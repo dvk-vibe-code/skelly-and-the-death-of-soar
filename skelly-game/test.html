@@ -1,0 +1,78 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style></head>
+<body><canvas id="game"></canvas><script src="game.js"></script>
+<script>
+// Temporary headless test harness — jumps to scenes and simulates input.
+window.onerror = (m, s, l, c) => console.error('JSERR', m, 'line', l, c);
+const _ce = console.error; console.error = (...a) => _ce('JSERR', ...a.map(x => x && x.stack ? x.stack : x));
+const q = new URLSearchParams(location.search), mode = q.get('mode') || 'title', lvl = +(q.get('level') || 0);
+const key = (c, hold = 40) => { dispatchEvent(new KeyboardEvent('keydown', { code: c })); setTimeout(() => dispatchEvent(new KeyboardEvent('keyup', { code: c })), hold); };
+const md = (b, x, y) => { const e = new MouseEvent('mousedown', { button: b, clientX: x, clientY: y }); cv.dispatchEvent(e); };
+const mu = (b) => dispatchEvent(new MouseEvent('mouseup', { button: b }));
+const setup = () => { stats = baseStats(); player = newPlayer(); ptero = { hidden: false, x: 0, y: 0, z: 90, a: 0, cd: 1.5, beam: null }; stats.agentsUnlocked = true; player.meter = 100; };
+// Deterministic sim: step update() manually with scripted input, then render one frame.
+function sim(seconds, script) {
+  for (let i = 0; i < seconds * 60; i++) {
+    script && script(i);
+    try { update(1 / 60); } catch (e) { console.error(e); }
+    for (const k in pressed) delete pressed[k];
+    mouse.pressed = [false, false, false];
+  }
+  render();
+}
+function fight(i) {
+  const tgt = enemies.find(e => !e.dead && e.spawnT <= 0) ;
+  if (tgt) { const s = iso(tgt.x, tgt.y); mouse.x = s.x * Z; mouse.y = s.y * Z; }
+  mouse.down[0] = true;
+  const dirs = ['KeyW', 'KeyD', 'KeyS', 'KeyA'];
+  for (const d of dirs) keys[d] = false;
+  keys[dirs[Math.floor(i / 50) % 4]] = true;
+  if (i % 90 === 0) pressed.KeyQ = true;
+  if (i % 200 === 0) mouse.pressed[2] = true;
+  if (i % 130 === 0) pressed.Space = true;
+  if (i === 120) pressed.KeyE = true;
+  if (i % 400 === +(q.get('tAt') || 30)) pressed.KeyT = true;
+  if (dlg && i % 20 === 0) pressed.Enter = true;
+  if (G.state === 'dead') { player.hp = stats.maxHp; G.state = 'play'; }
+  player.hp = Math.max(player.hp, 30); // keep alive for testing
+  if (stats.bindUnlocked && G.state === 'play') { const b = enemies.find(e => e.type === 'soac'); if (b) { player.x = b.x + 120; player.y = b.y + 120; pressed.KeyR = true; } }
+}
+setTimeout(() => {
+  const simT = +(q.get('sim') || 0);
+  if (simT) {
+    setup(); stats.atkMul = +(q.get('atk') || 1);
+    if (mode === 'intro') { startIntro(); sim(simT, i => { if (i % 30 === 0) pressed.Enter = true; }); }
+    else if (mode === 'ending') { startEnding(); sim(simT, i => { if (i % 25 === 0) pressed.Enter = true; }); }
+    else if (mode === 'transform') { enterLevel(LEVELS.length - 1, true); sim(simT, i => { fight(i); if (G.state === 'transform') { mouse.down[0] = false; } }); }
+    else if (mode === 'perf') {
+      enterLevel(lvl, true); sim(3, fight);
+      const t0 = performance.now(); for (let i = 0; i < 60; i++) { update(1 / 60); render(); } const ms = (performance.now() - t0) / 60;
+      console.error('PERF level', lvl, 'avg ms/frame', ms.toFixed(2), 'worldPX', PX_WORLD, 'worldBuf', Math.ceil(W / PX_WORLD) + 'x' + Math.ceil(H / PX_WORLD), 'enemies', enemies.length);
+      return;
+    }
+    else if (mode === 'beam') {
+      enterLevel(0, true); sim(0.5, () => {}); ptero.x = player.x + 60; ptero.y = player.y - 60; ptero.z = 40;
+      ptero.beams = [{ x: player.x + 250, y: player.y + 50, z: 20, t: 5 }, { x: player.x - 100, y: player.y + 200, z: 20, t: 5 }];
+      render(); console.error('BEAMS', ptero.beams.length, 'PIX', PIX); return;
+    }
+    else if (mode === 'socrates') { const n = +(q.get('skip') || 0); enterLevel(lvl); sim(simT, i => { if (i < n * 12 && i % 12 === 0) pressed.Enter = true; }); }
+    else if (mode === 'view') { enterLevel(lvl, true); player.x = +q.get('px'); player.y = +q.get('py'); camSet(player.x, player.y); sim(simT, i => { if (i > 60 && i < 70) { G.wave = -1; } }); }
+    else { enterLevel(lvl, true); sim(simT, fight); }
+    console.error('STATE', G.state, 'level', G.level, 'wave', G.wave, 'enemies', enemies.length, 'alerts', G.alerts, 'hp', Math.round(player.hp), 'cleared', G.cleared, 'reward', !!G.reward, 'ptero', ptero.mode, ptero.t && ptero.t.toFixed(2), 'cd', ptero.cd.toFixed(1), 'beams', (ptero.beams||[]).length, 'tgt', ptero.tgt ? Math.round(dist(ptero, ptero.tgt)) : null, 'z', Math.round(ptero.z));
+    return;
+  }
+  if (mode === 'story') startGame();
+  if (mode === 'intro') { setup(); startIntro(); setInterval(() => key('Enter'), 400); }
+  if (mode === 'play' || mode === 'boon' || mode === 'dlg') {
+    setup(); enterLevel(lvl, mode !== 'dlg');
+    if (mode !== 'dlg') {
+      mouse.x = 760; mouse.y = 330; md(0, 760, 330);
+      let i = 0; setInterval(() => { i++; key(['KeyW', 'KeyD', 'KeyS', 'KeyA'][i % 4], 300); if (i % 3 === 0) key('KeyQ'); if (i % 5 === 0) { md(2, 760, 330); mu(2); } if (i === 6) key('KeyE'); if (i % 7 === 0) key('Space'); }, 350);
+    }
+    if (mode === 'boon') setTimeout(() => { G.reward = null; openBoon(); }, 1500);
+  }
+  if (mode === 'ending') { setup(); startEnding(); }
+  if (mode === 'transform') { setup(); enterLevel(LEVELS.length - 1, true); setTimeout(() => { const b = enemies.find(e => e.type === 'soac'); if (b) { b.spawnT = 0; dlg = null; b.introDone = true; startTransform(b); } }, 3500); }
+}, 300);
+</script></body></html>
