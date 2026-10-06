@@ -26,7 +26,7 @@ const MAIN = cv.getContext('2d');
 const buf = document.createElement('canvas');
 const bctx = buf.getContext('2d', { willReadFrequently: true });
 let ctx = MAIN;
-let W, H, DPR, Z = 1, VW, VH, PX_WORLD = 3, PASS_PX = 1, PIX = 1, CRISP = false, CRT = true;
+let W, H, DPR, Z = 1, VW, VH, PX_WORLD = 3, PX_TITLE = 4, PASS_PX = 1, PIX = 1, CRISP = false, CRT = true;
 let scanPattern = null;
 const textQueue = [];
 // shadowBlur is in device pixels (ignores transforms) — rescale it so glows stay proportional in the buffer.
@@ -37,9 +37,11 @@ function resize() {
   W = innerWidth; H = innerHeight;
   cv.width = W * DPR | 0; cv.height = H * DPR | 0;
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
-  Z = clamp(Math.min(W / 980, H / 610), 0.7, 2);
+  Z = clamp(Math.min(W / 1400, H / 870), 0.5, 1.6);
   VW = W / Z; VH = H / Z;
-  PX_WORLD = Math.max(4, Math.round(H / 165));
+  // world pixel size follows the zoom so sprites (drawn 1:1 in buffer pixels) keep their size relative to the room
+  PX_WORLD = Math.max(3, Math.round(Z * 3.8));
+  PX_TITLE = Math.max(4, Math.round(H / 165));
   const sc = document.createElement('canvas'); sc.width = 1; sc.height = 3;
   const s = sc.getContext('2d'); s.fillStyle = 'rgba(0,0,0,0.22)'; s.fillRect(0, 2, 1, 1);
   scanPattern = MAIN.createPattern(sc, 'repeat');
@@ -2590,7 +2592,7 @@ function renderTitle() {
 function render() {
   MAIN.setTransform(1, 0, 0, 1, 0, 0); MAIN.fillStyle = '#000'; MAIN.fillRect(0, 0, cv.width, cv.height);
   switch (G.state) {
-    case 'title': beginPass(PX_WORLD); setUI(); CRISP = true; renderTitle(); CRISP = false; endPass(22); break;
+    case 'title': beginPass(PX_TITLE); setUI(); CRISP = true; renderTitle(); CRISP = false; endPass(22); break;
     case 'story': beginPass(3); setUI(); CRISP = true; renderStory(); CRISP = false; endPass(24); break;
     default: {
       beginPass(PX_WORLD); renderWorld(); endPass(22);
