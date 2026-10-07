@@ -1,6 +1,7 @@
 'use strict';
 // =====================================================================
-//  SKELLY & THE DEATH OF SOAR — A Torq Hyperautomation Tale
+//  SOC IT TO ME, SKELLY: A Flaming Skeleton's Unreasonable Guide to Killing
+//  Alert Fatigue and Going Home on Time — A Torq Hyperautomation Tale
 //  Isometric hack-and-slash demo (Hades-style). Pure canvas, no deps.
 // =====================================================================
 
@@ -92,7 +93,7 @@ function flushText() {
 }
 
 // ---------- input ----------
-const keys = {}, pressed = {};
+const keys = {}, pressed = {}, heldPress = {}, heldMouse = [false, false, false];
 addEventListener('keydown', e => {
   if (!keys[e.code]) pressed[e.code] = true;
   keys[e.code] = true;
@@ -105,7 +106,10 @@ cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY
 cv.addEventListener('mousedown', e => { mouse.down[e.button] = true; mouse.pressed[e.button] = true; audioInit(); });
 addEventListener('mouseup', e => { mouse.down[e.button] = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = [false, false, false]; });
+addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false; mouse.down = [false, false, false];
+  if (G.state === 'play' && !dlg) G.state = 'pause';
+});
 function advPressed() { return pressed.Enter || pressed.NumpadEnter || pressed.Space || mouse.pressed[0]; }
 
 // ---------- audio ----------
@@ -268,9 +272,10 @@ function wrapLines(str, maxW, size, font = UI_FONT) {
 function drawTyped(lines, chars, x, y, lh, size, col, align = 'left') {
   let left = chars;
   for (let i = 0; i < lines.length && left > 0; i++) {
-    const s = lines[i].slice(0, Math.max(0, Math.floor(left)));
+    const cps = Array.from(lines[i]); // slice by code point so emoji never split mid-surrogate
+    const s = cps.slice(0, Math.max(0, Math.floor(left))).join('');
     if (s) text(s, x, y + i * lh, size, col, align);
-    left -= lines[i].length + 1;
+    left -= cps.length + 1;
   }
 }
 
@@ -282,32 +287,398 @@ function drawTyped(lines, chars, x, y, lh, size, col, align = 'left') {
 //  HAND-PIXELLED SPRITES — one grid character = one pixel, drawn 1:1 onto
 //  the low-res buffer (or at an integer multiple for portraits/title).
 // =====================================================================
-const SKELLY_BODY = [
-  '...knnnhwwwwhnnnk...',
-  '...kntnnhhhhnntnk...',
-  '...kntnnnnnnnntnk...',
-  '...kntnnntnnnntnk...',
-  '..kntnnnntnnnnntnk..',
-  '..kntnnnntnnnnntnk..',
-  '..kntnnntnnnnnntnk..',
-  '.kntnnnntnnnnnnntnk.',
-  '.kntnnnntnnnntnntnk.',
-  '.kntnnntnnnnntnntnk.',
-  'kntnnnntnnnnntnnntnk',
-  'kntnnnntnnnnntnnntnk',
-  'kNtNNNtNNNNNtNNNtNNk',
-];
+// ---------- pixel painter: shapes rasterised onto a char grid (one cell = one sprite pixel) ----------
+function pixGrid(W, H) {
+  const g = []; for (let y = 0; y < H; y++) g.push(new Array(W).fill('.'));
+  const set = (x, y, c) => { x = Math.floor(x); y = Math.floor(y); if (x >= 0 && y >= 0 && x < W && y < H) g[y][x] = c; };
+  const get = (x, y) => (x >= 0 && y >= 0 && x < W && y < H) ? g[y][x] : '.';
+  const span = (y, x0, x1, c) => { for (let x = Math.ceil(x0 - 0.5); x <= Math.floor(x1 - 0.5); x++) set(x, y, c); };
+  const poly = (pts, c) => {
+    const ys = pts.map(p => p[1]), y0 = Math.floor(Math.min(...ys)), y1 = Math.ceil(Math.max(...ys));
+    for (let y = y0; y <= y1; y++) {
+      const py = y + 0.5, xs = [];
+      for (let i = 0; i < pts.length; i++) {
+        const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % pts.length];
+        if ((ay <= py) !== (by <= py)) xs.push(ax + (py - ay) / (by - ay) * (bx - ax));
+      }
+      xs.sort((a, b) => a - b);
+      for (let i = 0; i + 1 < xs.length; i += 2) span(y, xs[i], xs[i + 1], c);
+    }
+  };
+  const ln = (x0, y0, x1, y1, c, only) => {
+    const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let i = 0; i <= n; i++) { const x = x0 + (x1 - x0) * i / n, y = y0 + (y1 - y0) * i / n; if (!only || only.includes(get(Math.floor(x), Math.floor(y)))) set(x, y, c); }
+  };
+  const disc = (cx, cy, rx, c, ry = rx) => {
+    for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++)
+      if (((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 <= 1) set(x, y, c);
+  };
+  const stamp = (rows, ox, oy, flip = false) => rows.forEach((r, y) => [...r].forEach((c, x) => { if (c !== '.') set(flip ? ox + r.length - 1 - x : ox + x, oy + y, c); }));
+  // 1px outer outline, returned as row strings
+  const outline = (k = 'k') => {
+    const out = g.map(r => r.slice());
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (g[y][x] !== '.') continue;
+      if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => { const c = get(x + dx, y + dy); return c !== '.' && c !== k; })) out[y][x] = k;
+    }
+    return out.map(r => r.join(''));
+  };
+  return { W, H, g, set, get, span, poly, ln, disc, stamp, outline };
+}
+
+// ---------- Skelly: procedural directional pixel sprite ----------
+// Painted onto a small char grid (one cell = one buffer pixel), auto-outlined, then cached as a sprite.
+// view: 'front' | 'back' | 'side' (faces right; flip for left) · pose: 'idle' | 'walk' | 'atk' | 'dash' · f: frame
+const SK_W = 34, SK_H = 32, SK_CX = 17, SK_GROUND = 30;
+const SK_PAL = { k: '#06060e', h: '#02030a', N: '#0d1736', n: '#1a2a5c', m: '#26407e', t: '#1aa0b8', T: '#6ff0ff',
+  w: '#f4f1e8', g: '#b3ad98', G: '#6f6a58', p: '#ff5cf0', P: '#ffffff', q: '#a03ae0' };
+const SK_FRAMES = { idle: 4, walk: 8, atk: 1, dash: 1 };
+const SKULL_FRONT = ['.wwwwww.', 'wwwwwwww', 'wkwwwwkw', 'wkkwwkkw', 'wkpwwpkw', 'gwwkkwwg', '.wkwkwk.', '..gwwg..'];
+const SKULL_SIDE = ['.wwww.', 'wwwwww', 'wwwkkw', 'wwwkpk', 'gwwwwh', '.wwkwk', '.gwwg.'];
+function skellyGrid(view, pose, f) {
+  const W = SK_W, H = SK_H, cx = SK_CX;
+  const P = pixGrid(W, H), { g, set, get, span, poly, ln, stamp } = P;
+
+  const TAU = Math.PI * 2, n = SK_FRAMES[pose] || 1, ph = f / n;
+  let handAt = [cx, SK_GROUND - 12];
+  const walk = pose === 'walk', dash = pose === 'dash', raised = pose === 'idle';
+  const sw = walk ? Math.sin(ph * TAU) : 0;                // stride: -1..1
+  const breath = pose === 'idle' ? (Math.sin(ph * TAU) + 1) / 2 : pose === 'atk' ? 1 : 0;
+  const bob = walk ? (Math.abs(Math.cos(ph * TAU)) > 0.7 ? 0 : 1) : (breath > 0.5 ? 0 : 1) * (pose === 'idle' ? 1 : 0);
+  const y0 = 12 + bob, y1 = SK_GROUND, side = view === 'side';
+  const lean = side ? (walk ? 1.2 : dash ? 2.5 : 0.3) : 0;
+  const sway = dash ? -2.6 : walk ? sw * 1.5 : (breath - 0.5) * 0.6;
+  // robe silhouette
+  const hw = y => { const k = (y - y0) / (y1 - y0); return side ? 4.2 + 3.6 * Math.pow(k, 0.9) : 5.3 + 4.6 * Math.pow(k, 0.85); };
+  const off = y => { const k = (y - y0) / (y1 - y0); return (side ? lean * (1 - k) * 1.6 : 0) + sway * Math.pow(k, 1.6); };
+  const xl = y => cx + off(y) - hw(y) - (side ? (walk ? 1 + Math.max(0, -sw) * 1.5 : dash ? 3 : 0.6) * Math.pow((y - y0) / (y1 - y0), 2) : 0);
+  const xr = y => cx + off(y) + hw(y) * (side ? 0.8 : 1) + (side ? Math.max(0, sw) * 1.6 * Math.pow((y - y0) / (y1 - y0), 3) : 0);
+  for (let y = y0; y <= y1; y++) span(y, xl(y), xr(y), 'N');
+  // tattered, flowing hem (points drift with the walk/idle phase); stride lifts the hem over the forward leg
+  for (let x = 0; x < W; x++) {
+    const c = x + 0.5 - cx;
+    let cut = Math.round(1 + Math.cos(c * TAU / 4.2 + ph * TAU * (walk ? 1 : 0.5) + (side ? 1 : 0)));
+    if (walk && !side) cut += Math.round(Math.max(0, c < 0 ? sw : -sw) * 2 * (Math.abs(c) < 6 ? 1 : 0.5));
+    for (let k = 0; k < cut; k++) if (get(x, y1 - k) !== '.') set(x, y1 - k, '.');
+  }
+  // folds + flowing teal stripes (the reference's signature look)
+  const stripes = side ? [-0.55, 0.05, 0.6] : view === 'back' ? [-0.7, -0.15, 0.4, 0.88] : [-0.68, -0.05, 0.6];
+  stripes.forEach((u, i) => {
+    const ys = y0 + 1 + (i % 2) * 3;
+    for (let y = ys; y <= y1; y++) {
+      const k = (y - y0) / (y1 - y0), x = cx + off(y) + u * hw(y) + Math.sin(y * 0.55 + i * 2.1 + ph * TAU) * 0.7;
+      if (get(Math.floor(x), y) === '.') continue;
+      set(x, y, y === ys ? 'T' : 't');
+      if (k > 0.72 && (i + y) % 3) { const x2 = x + (u < 0 ? -1 : 1); if (get(Math.floor(x2), y) !== '.') set(x2, y, 't'); }
+    }
+    if (i < stripes.length - 1) {
+      const um = (u + stripes[i + 1]) / 2;
+      for (let y = Math.round(y0 + (y1 - y0) * 0.35); y <= y1; y++) { const x = cx + off(y) + um * hw(y) + Math.sin(y * 0.4 + i) * 0.6; if (get(Math.floor(x), y) === 'N') set(x, y, 'h'); }
+    }
+  });
+  // robe edge shading: light from top-left
+  for (let y = y0; y <= y1; y++) for (let x = 0; x < W; x++) if (get(x, y) === 'N' && get(x + 1, y) === '.') set(x, y, 'h');
+
+  // ---- sleeves + bony hands ----
+  const hand = (wx, wy, sx, up) => {
+    // open claw like the reference: palm + spread, slightly curled fingers
+    set(wx, wy, 'w'); set(wx + sx, wy, 'g');
+    if (up) { set(wx - sx, wy - 1, 'w'); set(wx - sx, wy - 2, 'g'); set(wx + sx * 0, wy - 2, 'w'); set(wx, wy - 3, 'w');
+      set(wx + sx * 1.2, wy - 2, 'w'); set(wx + sx * 2, wy - 3, 'w'); set(wx + sx * 2, wy - 1, 'w'); set(wx + sx * 3, wy - 1, 'g'); }
+    else { set(wx, wy + 1, 'w'); set(wx - sx, wy + 2, 'g'); set(wx + sx, wy + 2, 'w'); set(wx + sx * 0, wy + 3, 'g'); }
+  };
+  const sleeveFront = (sx, behind) => {
+    const S = (dx, y) => [cx + sx * dx, y];
+    if (raised) {
+      const L = breath * 1.2;
+      poly([S(3.5, y0 - 0.5), S(6.5, y0), S(11.5, y0 + 1 - L), S(13, y0 + 3.5 - L), S(11.8, y0 + 8.5), S(10, y0 + 11.5), S(8.6, y0 + 9), S(6.2, y0 + 7)], behind ? 'h' : 'N');
+      if (!behind) { ln(cx + sx * 7.5, y0 + 2, cx + sx * 10.5, y0 + 9, 't', 'N'); ln(cx + sx * 9.5, y0 + 1.5, cx + sx * 12, y0 + 6, 'T', 'N'); ln(cx + sx * 8, y0 + 5, cx + sx * 9.5, y0 + 10, 'h', 'N'); }
+      return [cx + sx * 12.3, y0 + 0.5 - L];
+    }
+    const a = walk ? sx * sw * 0.9 : dash ? 1.2 : 0;     // front view: swing reads as a small rise/drop
+    const cy = y0 + 9 - Math.abs(a) * (sx * sw > 0 ? 1.5 : 0);
+    poly([S(3.5, y0 - 0.5), S(6.5, y0), S(9.2, cy - 1), S(9.6, cy + 1.5), S(7.6, cy + 2), S(6, y0 + 6)], behind ? 'h' : 'N');
+    if (!behind) ln(cx + sx * 6.8, y0 + 2, cx + sx * 8.4, cy + 1, 't', 'N');
+    return [cx + sx * 8.6, cy + 2.5];
+  };
+  if (!side) {
+    const back = view === 'back';
+    const hands = [-1, 1].map(sx => ({ sx, at: sleeveFront(sx, false) }));
+    for (const { sx, at } of hands) if (!back || raised) hand(at[0], at[1], sx, raised);
+    handAt = hands[1].at;
+  } else {
+    // far arm peeks out behind, near arm swings across the body
+    const swing = walk ? -sw * 0.8 : dash ? -1.3 : 0.25 + breath * 0.1;
+    const arm = (a, col, edge) => {
+      const sxp = cx + 0.5 + lean * 0.8, syp = y0 + 0.5, len = 8;
+      const ex = sxp + Math.sin(a) * len, ey = syp + Math.cos(a) * len;
+      const nx = Math.cos(a), ny = -Math.sin(a);
+      poly([[sxp - nx * 1.8, syp - ny * 1.8], [sxp + nx * 1.5, syp + ny * 1.5], [ex + nx * 2.6, ey + ny * 2.6], [ex - nx * 2.4, ey - ny * 2.4]], col);
+      if (edge) { ln(sxp - nx * 1.6, syp - ny * 1.6, ex - nx * 2.3, ey - ny * 2.3, 'N', ['n']); ln(sxp + nx * 0.4, syp + ny * 0.4, ex + nx * 1.8, ey + ny * 1.8, 't', ['n']); ln(ex - nx * 2, ey - ny * 2, ex + nx * 2.2, ey + ny * 2.2, 'T', ['n']); }
+      return [ex + Math.sin(a) * 1.2, ey + Math.cos(a) * 1.2];
+    };
+        const near = arm(swing, 'n', true);
+    handAt = near;
+    set(near[0], near[1], 'w'); set(near[0] + 1, near[1], 'g'); set(near[0], near[1] + 1, 'g'); set(near[0] + 1, near[1] + 1, 'w');
+  }
+
+  // ---- hood + skull ----
+  const tilt = side ? lean : 0, hx = cx + (side ? 1 + tilt * 0.8 : 0) + (view === 'front' && pose === 'dash' ? 0 : 0);
+  const top = y0 - 10;
+  const prof = [1.6, 3.2, 4.3, 5, 5.4, 5.6, 5.7, 5.7, 5.7, 5.9, 6.2, 6.5];
+  prof.forEach((w, i) => { const y = top + i; if (side) span(y, hx - w * 0.95, hx + w * 0.85 + (i > 2 && i < 8 ? 0.8 : 0), 'n'); else span(y, hx - w, hx + w, 'n'); });
+  if (view === 'front') {
+    const open = [0, 0, 2.2, 3.3, 3.8, 3.9, 3.9, 3.9, 3.7, 3.2, 2.4];
+    open.forEach((w, i) => { if (w) span(top + i, hx - w, hx + w, 'h'); });
+    stamp(SKULL_FRONT, Math.round(hx - 4), top + 3);
+    // hood rim catches teal light; brim shadows the brow for a meaner glare
+    ln(hx - 4.6, top + 2.5, hx - 5.7, top + 9, 't', ['n']); ln(hx + 4.4, top + 2.5, hx + 5.5, top + 9, 'm', ['n']);
+    set(hx - 2.5, top + 1, 'T'); set(hx - 1.5, top + 0.5, 'm');
+    if (f % 2 && pose === 'idle') { for (let y = top + 3; y < top + 8; y++) for (let x = 0; x < W; x++) if (g[y][x] === 'p') g[y][x] = 'q'; }
+  } else if (view === 'back') {
+    ln(hx - 0.2, top + 2, hx - 0.2, top + 11, 'N', ['n']);
+    ln(hx - 3.5, top + 3, hx - 4.8, top + 11, 't', ['n']); ln(hx + 3.2, top + 3, hx + 4.3, top + 11, 't', ['n']);
+    set(hx - 2, top + 1, 'T'); set(hx - 1, top + 0.5, 'm');
+  } else {
+    // side: deep cowl with the skull's grinning profile jutting forward
+    const open = [0, 0, 0, 1.6, 2.4, 2.6, 2.6, 2.6, 2.4, 2, 1.2];
+    open.forEach((w, i) => { if (w) span(top + i, hx + 3.6 - w, hx + 6.2, 'h'); });
+    stamp(SKULL_SIDE, Math.round(hx + 0.4), top + 3);
+    ln(hx - 4.6, top + 2.5, hx - 5.8, top + 11, 't', ['n']);
+    set(hx - 1.5, top + 1, 'T'); set(hx - 0.5, top + 0.5, 'm');
+    for (let y = top + 3; y < top + 4; y++) span(y, hx + 1.5, hx + 5.4, 'n');   // brim over the brow
+  }
+
+  return { rows: P.outline(), hand: handAt };
+}
+// ---------- Torq monster truck: side-on pixel sprite (faces right) ----------
+// f: wheel rotation frame (0-3), fl: exhaust flame frame (0-2)
+const TRUCK_W = 80, TRUCK_H = 58, TRUCK_GROUND = 56;
+const TRUCK_PAL = { k: '#050508', K: '#0c0c10', S: '#24242c', s: '#3a3a46', n: '#16161e', N: '#2c2c3c', h: '#08080c',
+  c: '#b8c0cc', C: '#ffffff', u: '#36d3e6', G: '#1d5a70', g: '#7fe8ff', o: '#ff6a00', y: '#ffd23b', Y: '#fff6c8',
+  r: '#ff2a3a', v: '#c040ff', w: '#f4f1e8', p: '#a040e0', a: '#ffb02e' };
+const PIXFONT = { T: ['###', '.#.', '.#.', '.#.', '.#.'], O: ['###', '#.#', '#.#', '#.#', '###'], R: ['##.', '#.#', '##.', '#.#', '#.#'], Q: ['###', '#.#', '#.#', '##.', '.##'] };
+function truckGrid(f, fl) {
+  const P = pixGrid(TRUCK_W, TRUCK_H), { set, get, span, poly, ln, disc, stamp } = P;
+  const gy = TRUCK_GROUND, R = 11, wy = gy - R, wheels = [19, 61];
+  // suspension: chassis rail, A-arms, long-travel shocks
+  for (let x = 12; x <= 70; x++) { set(x, 30, 's'); set(x, 31, 'S'); }
+  for (const cx of wheels) { ln(cx - 7, 31, cx, wy, 'S'); ln(cx + 7, 31, cx, wy, 'S'); for (let y = 26; y <= wy - 2; y++) { set(cx - 2, y, y % 2 ? 'a' : 'o'); set(cx + 2, y, y % 2 ? 'o' : 'a'); } }
+  ln(wheels[0], wy - 1, wheels[1], wy - 1, 's');
+  // body: bed, cab, hood
+  poly([[3, 16], [36, 16], [36, 27], [5, 27], [3, 25]], 'n');                         // bed
+  poly([[35, 6], [52, 6], [58, 15], [58, 27], [35, 27]], 'n');                       // cab
+  poly([[56, 14], [74, 16], [77, 19], [77, 27], [56, 27]], 'n');                     // hood
+  for (let x = 4; x <= 35; x++) set(x, 16, 'N'); for (let x = 36; x <= 51; x++) set(x, 6, 'N'); ln(57, 14, 74, 16, 'N');
+  // fenders flare over the tyres
+  for (const cx of wheels) { for (let x = cx - 13; x <= cx + 13; x++) { const d = Math.abs(x - cx) / 13, y = 26 + Math.round(d * d * 2); set(x, y, 'N'); set(x, y + 1, 'h'); } }
+  // windows + windshield glare
+  poly([[38, 8], [50, 8], [55, 15], [38, 15]], 'G'); ln(46, 8, 49, 15, 'g', ['G']); ln(48, 8, 51, 13, 'g', ['G']); for (let y = 8; y <= 15; y++) set(44, y, 'n');
+  // door seams, handle, roof light bar
+  for (let y = 16; y <= 26; y++) { set(37, y, 'h'); set(56, y, 'h'); } set(41, 18, 'c'); set(42, 18, 'c');
+  for (let x = 38; x <= 50; x++) set(x, 5, 's'); for (let x = 39; x <= 49; x += 2) set(x, 4, 'y');
+  // headlight, grille, bumper, tail light
+  set(76, 19, 'Y'); set(76, 20, 'Y'); set(75, 19, 'y'); for (let y = 21; y <= 26; y++) set(77, y, 'c'); for (let x = 70; x <= 78; x++) set(x, 27, 'c');
+  set(3, 18, 'r'); set(3, 19, 'r'); for (let x = 2; x <= 8; x++) set(x, 27, 's');
+  // painted flames licking back along the body
+  for (let i = 0; i < 9; i++) {
+    const bx = 74 - i * 7.6, h = 4 + (i % 2) * 2;
+    poly([[bx, 26], [bx - 9, 26 - h], [bx - 6, 26]], 'o'); poly([[bx - 1, 26], [bx - 6.5, 26 - h * 0.55], [bx - 4.5, 26]], 'y');
+  }
+  // skull on the door, TORQ on the bed
+  stamp(['.www.', 'wwwww', 'wpwpw', 'wwwww', '.w.w.'], 44, 17);
+  let tx = 8; for (const ch of 'TORQ') { stamp(PIXFONT[ch].map(r => r.replace(/#/g, 'w')), tx, 18); tx += 5; }
+  // exhaust stacks behind the cab, spitting Torq-purple and orange flame
+  for (const ex of [29, 32]) { for (let y = 8; y <= 15; y++) { set(ex, y, 'c'); set(ex + 1, y, 's'); } set(ex, 8, 'C'); }
+  const fh = [7, 10, 8][fl], fh2 = [9, 6, 10][fl];
+  for (const [ex, h] of [[29, fh], [32, fh2]]) {
+    poly([[ex - 0.5, 8], [ex + 0.5 + (fl - 1) * 0.6, 8 - h], [ex + 2.5, 8]], 'v');
+    poly([[ex, 8], [ex + 0.8, 8 - h * 0.6], [ex + 2, 8]], 'a');
+  }
+  // tyres: chunky tread, sidewall, chrome rim, cyan hub; tread + lugs rotate with f
+  for (const cx of wheels) {
+    disc(cx, wy, R, 'K'); disc(cx, wy, R - 2.5, 'S'); disc(cx, wy, 5.2, 'c'); disc(cx, wy, 3.6, 's'); disc(cx, wy, 1.6, 'u');
+    for (let i = 0; i < 16; i++) { const b = (i + f / 2) / 16 * Math.PI * 2; if (i % 2 === 0) { set(cx + Math.cos(b) * (R + 0.5), wy + Math.sin(b) * (R + 0.5), 'K'); set(cx + Math.cos(b + 0.12) * (R + 0.5), wy + Math.sin(b + 0.12) * (R + 0.5), 'K'); } }
+    for (let i = 0; i < 14; i++) { const a = (i + f / 4) / 14 * Math.PI * 2; set(cx + Math.cos(a) * (R - 0.6), wy + Math.sin(a) * (R - 0.6), 'S'); set(cx + Math.cos(a) * (R - 1.4), wy + Math.sin(a) * (R - 1.4), 'S'); }
+    for (let i = 0; i < 5; i++) { const a = (i + f / 4) / 5 * Math.PI * 2; set(cx + Math.cos(a) * 4.3, wy + Math.sin(a) * 4.3, 'C'); }
+    set(cx - 3, wy - 4, 'C');
+  }
+  return P.outline();
+}
+// ---------- Pterodactyl: skeletal, pink-boned, toothed beak, glowing cyan eye (faces right) ----------
+// f: wing-flap frame (0-5). Returns rows plus the eye (laser origin) and body anchor in sprite pixels.
+const PT_W = 102, PT_H = 114, PT_FRAMES = 6, PT_EYE = [73, 44], PT_BODY = [40, 62];
+const PT_PAL = { k: '#12081f', b: '#f2609e', B: '#ffa3cc', d: '#a8326e', m: '#1b1a3d', M: '#35347c', x: '#0b0614',
+  e: '#7ff6ff', E: '#ffffff', t: '#ffd6e8' };
+function pteroGrid(f) {
+  const P = pixGrid(PT_W, PT_H), { set, get, poly, ln, disc } = P;
+  const v = Math.sin(f / PT_FRAMES * Math.PI * 2);   // -1 wings up … 1 wings down
+  const lerp2 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  const bone = (a, b, w = 1.3, hi = true) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1, nx = -dy / l * w, ny = dx / l * w;
+    poly([[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], 'b');
+    disc(a[0], a[1], w + 0.6, 'b'); disc(b[0], b[1], w + 0.6, 'b');
+    if (hi) ln(a[0] - nx * 0.5, a[1] - ny * 0.5, b[0] - nx * 0.5, b[1] - ny * 0.5, 'B', ['b']);
+  };
+  // tattered, feathery membrane spanning the wing bones (shoulder S, elbow E, wrist Wr, finger tip T) back to the body
+  const wing = (S, E, Wr, T, root, sgn) => {
+    const trail = [];
+    for (let i = 0; i <= 12; i++) {
+      const p = lerp2(T, root, i / 12), dx = root[0] - T[0], dy = root[1] - T[1], l = Math.hypot(dx, dy);
+      const d = (Math.sin(i / 12 * Math.PI) * 10 - (i % 2 ? 0 : 5)) * sgn;
+      trail.push([p[0] + dy / l * d, p[1] - dx / l * d]);
+    }
+    poly([T, Wr, E, S, ...trail.slice().reverse()], 'm');
+    for (let i = 1; i < 12; i += 2) ln(Wr[0], Wr[1], trail[i][0], trail[i][1], 'M', ['m']);
+    bone(S, E, 1.7); bone(E, Wr, 1.5); bone(Wr, T, 1.1);
+    ln(Wr[0], Wr[1], Wr[0] + 5, Wr[1] - 1, 'b'); set(Wr[0] + 6, Wr[1], 'B'); set(Wr[0] + 6, Wr[1] + 1, 'B');   // hooked wrist claw
+  };
+  const up = (1 - v) / 2;   // 1 = wings fully raised
+  // far wing (behind the body) reaches up
+  wing([46, 56], [56, 44 - 8 * up], [62, 30 - 22 * up], [6, 26 - 22 * up], [24, 60], 1);
+  // tail + legs
+  for (let i = 0; i < 6; i++) disc(20 - i * 3, 58 - i * 1.2, 1.8 - i * 0.2, i % 2 ? 'd' : 'b');
+  bone([26, 64], [21, 76], 1.3, false); bone([21, 76], [14, 84], 1);
+  for (const [dx, dy] of [[-4, 2], [-3, 4], [-1, 4]]) ln(14, 84, 14 + dx, 84 + dy, 'b');
+  // ribcage: dark hollow, curved ribs, spine of knuckled vertebrae
+  disc(38, 62, 15, 'x', 8);
+  for (let i = 0; i < 8; i++) { const x = 27 + i * 3.3; ln(x, 55, x - 1.5, 62, 'b'); ln(x - 1.5, 62, x - 0.5, 69 - Math.abs(i - 3.5) * 0.6, 'b'); }
+  for (let x = 20; x <= 55; x++) { const y = 55 - (x - 20) * 0.05; set(x, y, 'b'); set(x, y - 1, x % 3 ? 'b' : 'B'); }
+  for (let x = 24; x <= 50; x++) set(x, 69 - Math.abs(x - 37) * 0.08, 'd');
+  disc(23, 60, 3, 'b', 2.5); set(22, 59, 'B');
+  // neck vertebrae up to the skull
+  for (let i = 0; i <= 5; i++) { const p = lerp2([54, 54], [67, 47], i / 5); disc(p[0], p[1], 2.3, i % 2 ? 'd' : 'b'); }
+  // skull: open toothed jaws, swept-back crest, angry brow over a glowing cyan eye.
+  // Laid out at double size and halved about the neck joint (67, 47) so it stays in proportion to the body.
+  const hs = (x, y) => [67 + (x - 67) / 2, 47 + (y - 47) / 2], hp = pts => pts.map(p => hs(p[0], p[1]));
+  const hl = (x0, y0, x1, y1, c, only) => ln(...hs(x0, y0), ...hs(x1, y1), c, only);
+  poly(hp([[86, 51], [128, 52], [121, 68], [86, 56]]), 'x');
+  poly(hp([[80, 54], [88, 52], [122, 68], [120, 71], [84, 61]]), 'b');
+  hl(86, 61, 119, 71, 'd', ['b']);
+  poly(hp([[84, 38], [130, 50], [128, 53], [86, 52]]), 'b');
+  hl(86, 39, 129, 50, 'B', ['b']);
+  poly(hp([[62, 40], [70, 34], [80, 34], [88, 40], [88, 50], [80, 56], [67, 54], [60, 48]]), 'b');
+  poly(hp([[66, 38], [44, 25], [48, 31], [63, 44]]), 'b'); hl(64, 39, 47, 28, 'B', ['b']);
+  for (let x = 80; x <= 95; x += 3) set(x, 50.2, 't');
+  for (let x = 81; x <= 91; x += 3) set(x, 49.5 + (x - 77.5) * 8 / 17 - 1, 't');
+  poly(hp([[91, 42], [104, 45], [101, 48], [91, 47]]), 'x');
+  disc(72.5, 44.6, 2.4, 'x', 2); disc(73, 44.6, 1.3, 'e', 1.1); set(73, 44, 'E');
+  hl(72, 37, 84, 40, 'k');
+  // near wing (in front of the body, toward the camera)
+  wing([40, 64], [52, 78 - 4 * up], [60, 98 - 12 * up], [4, 108 - 14 * up], [28, 68], -1);
+  return { rows: P.outline(), eye: PT_EYE, body: PT_BODY };
+}
+// HUD icon: the skull alone
+const PT_ICON = ['.kk..............', 'kbbk.....kkkkkk..', '.kbbkkkkkbbbbbbkk', '.kbbbbbbbbBBBBbbk', '..kbebbkxtxtxtxkk', '..kbbbbkxxxxxk...', '...kkbbbbbbbbbbk.', '.....kkkkkkkkkk..'];
+// ---------- SOC analysts (Maya, Dex, Kai): realistic-proportion front-view pixel sprites ----------
+// mood: 'tired' (slumped, eye bags; breathes + blinks) or 'happy' (cheering). Palette comes from analystPal().
+const HU_W = 22, HU_H = 32, HU_FRAMES = { tired: 4, happy: 2 };
+function humanGrid(name, mood, f) {
+  const P = pixGrid(HU_W, HU_H), { set, get, span, ln } = P;
+  const cx = 11, happy = mood === 'happy';
+  const d = !happy && f === 2 ? 1 : 0, blink = !happy && f === 3;   // breathing drop / blink
+  const over = (x, y, c, from) => { if (from.includes(get(Math.floor(x), Math.floor(y)))) set(x, y, c); };
+  // legs + shoes
+  for (let y = 19; y <= 28; y++) {
+    if (y < 23) span(y, cx - 3.6, cx + 3.6, 'p');
+    else { span(y, cx - 3.6, cx - 0.4, 'p'); span(y, cx + 0.4, cx + 3.6, 'p'); set(cx - 1, y, 'P'); }
+    set(cx + 3, y, 'P');
+  }
+  for (const [a, b] of [[cx - 4.3, cx - 0.4], [cx + 0.4, cx + 4.3]]) { span(29, a, b, 'f'); span(30, a, b, 'f'); set(a + 0.5, 29, 'F'); }
+  // Kai's hood bunches up behind the neck
+  if (name === 'KAI') span(9 + d, cx - 3.6, cx + 3.6, 'C');
+  // torso: shoulders taper to the waist, shaded away from the light (top-left)
+  const top = 10 + d;
+  for (let y = top; y <= 19; y++) {
+    const hw = 4.6 - (y - top) / (19 - top) * 0.9 - (y === top ? 1 : 0);
+    span(y, cx - hw, cx + hw, 'c'); set(cx + hw - 0.5, y, 'C'); set(cx + hw - 1.5, y, 'C');
+  }
+  span(19, cx - 3.6, cx + 3.6, name === 'KAI' ? 'C' : 'G');   // belt / hoodie hem
+  // outfits
+  if (name === 'MAYA') {          // blazer with lapels over a white top
+    for (let y = top; y <= top + 4; y++) { set(cx - 1, y, 'w'); set(cx, y, 'w'); set(cx - 2, y, 'D'); set(cx + 1, y, 'D'); }
+    set(cx - 1, top + 5, 'D'); set(cx, top + 5, 'D'); set(cx, 16, 'D'); set(cx, 18, 'D');
+  } else if (name === 'DEX') {    // button-up, white collar, lanyard + SOC badge
+    set(cx - 2, top, 'W'); set(cx + 1, top, 'W'); for (let y = top + 1; y <= 18; y += 2) set(cx, y, 'C');
+    ln(cx - 1.5, top, cx - 0.6, 14, 'b'); ln(cx + 1.5, top, cx + 0.6, 14, 'b');
+    for (let y = 14; y <= 16; y++) span(y, cx - 1.5, cx + 1.5, 'w'); set(cx, 15, 'b'); set(cx - 1, 15, 'e');
+  } else {                         // hoodie: drawstrings + front pocket
+    set(cx - 2, top + 2, 'w'); set(cx - 2, top + 3, 'w'); set(cx + 1, top + 2, 'w'); set(cx + 1, top + 3, 'w');
+    span(16, cx - 2.6, cx + 2.6, 'C');
+  }
+  // arms
+  const sleeve = (x0, y0, x1, y1, bare) => {
+    const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let i = 0; i <= n; i++) { const t = i / n, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t, c = bare && t > 0.5 ? 's' : 'c'; set(x, y, c); set(x + 1, y, bare && t > 0.5 ? 'S' : 'C'); }
+  };
+  const hand = (x, y) => { set(x, y, 's'); set(x + 1, y, 'S'); set(x, y + 1, 's'); set(x + 1, y + 1, 'S'); };
+  const bare = name === 'DEX';
+  if (happy) {
+    const r = f ? 2 : 0;           // pumping fists
+    sleeve(5, top + 1, 3, 4 + r, bare); hand(2.5, 2 + r);
+    sleeve(16, top + 1, 18, 4 + r, bare); hand(18.5, 2 + r);
+  } else if (name === 'MAYA') {    // arms folded across the chest
+    sleeve(5, top + 1, 5, top + 5); sleeve(16, top + 1, 16, top + 5);
+    span(top + 5, cx - 5, cx + 5, 'C'); span(top + 6, cx - 5, cx + 5, 'D'); set(cx - 5, top + 6, 's'); set(cx + 4, top + 5, 's');
+  } else if (name === 'KAI') {     // left arm hangs, right hand nurses a coffee
+    sleeve(5, top + 1, 5, 18); hand(5, 19);
+    sleeve(16, top + 1, 16, top + 4); ln(16, top + 5, 14, top + 6, 'C');
+    for (let y = top + 3; y <= top + 6; y++) span(y, 12.5, 15.5, 'u'); set(16, top + 4, 'u'); set(13, top + 3, 'W');
+    if (f % 2) set(14, top + 1, 'W'); else set(13, top + 1, 'W');   // steam
+  } else {
+    sleeve(5, top + 1, 5, 18, bare); hand(5, 19);
+    sleeve(16, top + 1, 16, 18, bare); hand(16, 19);
+  }
+  // neck + head
+  span(8 + d, cx - 1, cx + 1, 's'); set(cx, 9 + d, 'S'); span(9 + d, cx - 1, cx, 's');
+  const hy = 5.5 + d;
+  for (let y = Math.floor(hy - 3.4); y <= Math.ceil(hy + 3.4); y++) {
+    const k = (y + 0.5 - hy) / 3.4; if (Math.abs(k) > 1) continue;
+    const w = 3 * Math.sqrt(1 - k * k) + 0.25; span(y, cx - w, cx + w, 's');
+  }
+  for (let y = 0; y < HU_H; y++) for (const x of [cx + 2]) over(x, y, 'S', ['s']);
+  set(cx - 4, 6 + d, 's'); set(cx + 3, 6 + d, 'S');                                  // ears
+  // face: eyes (+ tired bags), nose shadow, mouth
+  const ey = 6 + d;
+  for (const x of [cx - 2, cx + 1]) { set(x, ey, blink ? 'S' : 'e'); set(x, ey - 1, 'H'); if (!happy) set(x, ey + 1, 'z'); }
+  set(cx, ey + 1, 'S');
+  if (happy) { set(cx - 2, ey + 1, 'm'); set(cx + 1, ey + 1, 'm'); set(cx - 1, ey + 2, 'm'); set(cx, ey + 2, 'm'); }
+  else { set(cx - 1, ey + 2, 'z'); set(cx, ey + 2, 'z'); }
+  // hair (+ gear)
+  if (name === 'MAYA') {
+    for (let y = 1 + d; y <= 3 + d; y++) span(y, cx - 3.3 + (y === 1 + d), cx + 3.3 - (y === 1 + d), 'H');
+    span(4 + d, cx - 3.4, cx - 0.5, 'H'); set(cx + 2, 4 + d, 'H');                   // side-swept fringe
+    for (let y = 4 + d; y <= 14 + d; y++) { set(cx - 4, y, 'H'); set(cx + 3, y, 'H'); if (y > 5 + d && y < 12 + d) { set(cx - 5, y, 'H'); set(cx + 4, y, 'H'); } }
+    set(cx - 2, 2 + d, 'h'); set(cx - 1, 1 + d, 'h'); set(cx - 3, 3 + d, 'h');
+    span(d + 0.4, cx - 2.5, cx + 2.5, 'G'); set(cx - 5, 6 + d, 'G'); set(cx - 5, 7 + d, 'G'); set(cx + 4, 6 + d, 'G');   // headset
+    ln(cx - 5, 8 + d, cx - 3, 9 + d, 'g');
+  } else if (name === 'DEX') {
+    for (let y = 2 + d; y <= 3 + d; y++) span(y, cx - 3.2 + (y === 2 + d) * 0.6, cx + 3.2 - (y === 2 + d) * 0.6, 'H');
+    set(cx - 3, 4 + d, 'H'); set(cx + 2, 4 + d, 'H'); set(cx - 1, 2 + d, 'h'); set(cx - 2, 2 + d, 'h');
+    // glasses: frames + lens glare
+    for (const x of [cx - 3, cx, cx - 1, cx + 2]) set(x, ey, 'G');
+    set(cx - 2, ey, 'L'); set(cx + 1, ey, 'L');
+    set(cx - 2, ey + 2, 'z'); set(cx + 1, ey + 2, 'z'); set(cx - 1, ey + 3, 'z');                          // stubble
+  } else {
+    const spikes = [1, 2, 0, 2, 1, 2, 0, 1];
+    for (let i = 0; i < 8; i++) { const x = cx - 4 + i; for (let y = 1 + spikes[i] + d; y <= 3 + d; y++) set(x, y, 'H'); }
+    set(cx - 3, 4 + d, 'H'); set(cx + 2, 4 + d, 'H'); set(cx - 1, 4 + d, 'H'); set(cx - 2, 2 + d, 'h'); set(cx + 1, 2 + d, 'h');
+  }
+  return P.outline();
+}
+// per-analyst colours: shared skin/hair/cloth from ANALYSTS plus derived shades and outfit extras
+const HU_EXTRA = {
+  MAYA: { p: '#2a2f3a', f: '#141418', F: '#4a4a58' },
+  DEX: { p: '#8a7a5a', f: '#4a2e1a', F: '#7a5030' },
+  KAI: { p: '#3a5a8a', f: '#e8e8ee', F: '#ffffff' },
+};
+function analystPal(name, A, shade) {
+  const X = HU_EXTRA[name];
+  return { k: '#0c0a10', s: A.skin, S: shade(A.skin, 0.82), z: shade(A.skin, 0.66), H: A.hair, h: shade(A.hair, 1.6),
+    c: A.shirt, C: shade(A.shirt, 0.75), D: shade(A.shirt, 0.55), p: X.p, P: shade(X.p, 0.75), f: X.f, F: X.F,
+    w: '#f4f1e8', W: '#c9c4b5', e: '#141018', m: '#7a2a2a', G: '#2a2d36', g: '#8a8f99', L: '#9ad0ff', b: '#36d3e6', u: '#efe9d2' };
+}
 const SPR_DEF = {
-  skelly: {
-    pal: { k: '#0a0a14', n: '#1c2c60', N: '#0e1838', t: '#1aa0b8', w: '#f4f1e8', g: '#a8a290', p: '#ee80ff', P: '#a040e0', h: '#02040a' },
-    frames: [
-      ['........kkkk........', '.......knnnnk.......', 'w.w...knnttnnk...w.w', 'wwww.knntnnnnnk.wwww', '.wwk.knhphhphnk.kww.',
-       '..knkknhwwwwhnkknk..', '...knknwpwwpwnknk...', '....kntwwkkwwtnk....', '....kntwwwwwwtnk....', '....kntwgwwgwtnk....',
-       ...SKELLY_BODY, '.kNk.kNNk.kNNk.kNk..'],
-      ['........kkkk........', '.......knnnnk.......', '.w.w..knnttnnk..w.w.', 'wwww.knntnnnnnk.wwww', '.wwk.knhPhhPhnk.kww.',
-       '..knkknhwwwwhnkknk..', '...knknwpwwpwnknk...', '....kntwwkkwwtnk....', '....kntwwwwwwtnk....', '....kntwgwwgwtnk....',
-       ...SKELLY_BODY, '..kNk.kNNk.kNNk.kNk.'],
-    ] },
   agent: {
     pal: { k: '#0e1220', W: '#e9eef7', G: '#9aa6bd', d: '#1b2236', c: '#ffffff' },
     frames: [['....c....', '....G....', '..kkkkk..', '.kWWWWWk.', '.kWcccWk.', '.kWWWWWk.', '..kkkkk..',
@@ -349,25 +720,6 @@ const SPR_DEF = {
     frames: [['.kkkkkkkkkkk..', '.kpppppppppkqk', '.kpRRRRRRRpkqk', '.kpppppppppkqk', '.kplllllllpkqk', '.kpppppppppkqk',
       '.kplllllpppkqk', '.kpppppppppkqk', '.kplllllllpkqk', '.kpppppppppkqk', '.kpllllppppkqk', '.kpppppppppkqk',
       '.kppRRRRpppkqk', '.kpppppppppkqk', '.kkkkkkkkkkkqk', '..kqqqqqqqqqqk', '...kkkkkkkkkkk']] },
-  ptero: {
-    pal: { V: '#6a2f8a', v: '#b46ad8', y: '#ffd860', E: '#ffffff' },
-    frames: [
-      ['.VV.........VV......', '..VVV.....VVV.......', '...VVVV.VVVV........', '....VVvvvVV..vv.....', '.....vvvvvvvvvvEyyyy',
-       '....Vvvvvvvv..vvv...', '...VV..vvv..........', '..V.....v...........', '....................'],
-      ['....................', '....................', '.............vv.....', '......vvvv..vvvV....', '.....vvvvvvvvvvEyyyy',
-       '...VVVvvvvVVV.vv....', '..VVVV....VVVV......', '.VVV........VVV.....', 'VV............VV....'],
-    ] },
-  analyst: {
-    pal: { k: '#111111', s: '#e2b48c', H: '#141414', S: '#6b7280', c: '#222222', m: '#7a3a2a', g: '#202020', L: '#9ad0ff' },
-    frames: [['...HHHH...', '..HHHHHH..', '..HssssH..', '..skssks..', '..ssssss..', '...smms...', '....ss....',
-      '..SSSSSS..', '.SSSSSSSS.', 'sSSSSSSSSs', '.SSSSSSSS.', '.cccccccc.', '....cc....', '..cccccc..']] },
-};
-// per-analyst tweaks to the shared base grid: [row, replacement]
-const ANALYST_ROWS = {
-  MAYA: [[2, '.HHssssHH.'], [3, '.HskssksH.'], [4, '.HssssssH.'], [5, '.HHsmmsHH.'], [6, '.HH.ss.HH.']],
-  DEX: [[3, '..gLggLg..']],
-  KAI: [[0, '..H.HH.H..']],
-  happy: [[6, 's...ss...s'], [7, 's.SSSSSS.s'], [9, '.SSSSSSSS.']],
 };
 
 const sprCache = new Map();
@@ -417,10 +769,28 @@ function bobPx(px) { return Math.round(px) * sprUnit(); }
 
 
 // Skelly — hooded grim reaper: navy robe with flowing teal stripes, white skull, purple eyes.
+function skellySprite(view, pose, f) {
+  const key = `skelly:${view}:${pose}:${f}`;
+  let s = sprCache.get(key);
+  if (!s) { const r = skellyGrid(view, pose, f); s = buildSprite(r.rows, SK_PAL); s.hand = r.hand; sprCache.set(key, s); }
+  return s;
+}
+// which way Skelly shows on screen for a world-space facing; diagonals keep the front/back view
+function skellyView(a, prev) {
+  const sx = Math.cos(a) - Math.sin(a), sy = (Math.cos(a) + Math.sin(a)) * 0.5;
+  return Math.abs(sx) > Math.abs(sy) * (prev === 'side' ? 2.2 : 2.4) ? 'side' : sy < 0 ? 'back' : 'front';
+}
+// o: view, pose, frame, flip, s, ghost, noShadow, under(hand) — draws something (the scythe) behind the robe.
+// Returns the scythe hand position in the current user space.
 function drawSkelly(x, y, o = {}) {
-  const sp = getSprite('skelly', Math.floor(G.t * 3 + (o.walk || 0) * 0.1) % 2);
+  const view = o.view || 'front', pose = o.pose || 'idle', n = SK_FRAMES[pose];
+  const f = o.frame ?? Math.floor(G.t * 3);
+  const sp = skellySprite(view, pose, ((f % n) + n) % n), sc = fitScale(sp, 106 * (o.s || 1));
+  const u = sc * sprUnit(), hand = { x: x + (sp.hand[0] - SK_W / 2) * u * (o.flip ? -1 : 1), y: y + (sp.hand[1] - SK_H) * u };
   if (!o.noShadow) shadow(x, y, 17 * (o.s || 1));
-  drawSprite(sp, x, y, fitScale(sp, 80 * (o.s || 1)), false, o.ghost ? 'ghost' : null);
+  if (o.under) o.under(hand);
+  drawSprite(sp, x, y, sc, view === 'side' && o.flip, o.ghost ? 'ghost' : null);
+  return hand;
 }
 function drawScythe(x, y, ang, s = 1, glow = 0) {
   ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(s, s);
@@ -494,12 +864,14 @@ const ANALYSTS = {
   DEX: { hair: '#141414', skin: '#e2b48c', shirt: '#6b7280' },
   KAI: { hair: '#5a3a22', skin: '#f0c9a0', shirt: '#2fbf71' },
 };
+// tired: breathe + blink on a slow loop; happy: pump fists with a little hop
+const HU_TIRED_SEQ = [0, 1, 0, 1, 2, 2, 0, 3];
 function drawAnalyst(x, y, name, s = 1, happy = false) {
-  const A = ANALYSTS[name], rows = SPR_DEF.analyst.frames[0].slice();
-  for (const [i, r] of (ANALYST_ROWS[name] || []).concat(happy ? ANALYST_ROWS.happy : [])) rows[i] = r;
-  const sp = getSprite('analyst', 0, { H: A.hair, s: A.skin, S: A.shirt }, rows);
+  const mood = happy ? 'happy' : 'tired', f = happy ? Math.floor(G.t * 4) % 2 : HU_TIRED_SEQ[Math.floor(G.t * 3) % 8];
+  const sp = cachedSprite(`human:${name}:${mood}:${f}`, () => ({ rows: humanGrid(name, mood, f), pal: analystPal(name, ANALYSTS[name], shadeHex) }));
+  const sc = spriteScale(sp, s);
   shadow(x, y, 12 * s);
-  drawSprite(sp, x, y, fitScale(sp, 56 * s));
+  drawSprite(sp, x, y - (happy && f ? sc * sprUnit() : 0), sc);
 }
 // SOC Goblin — small green goblin in a hoodie, hunched over a keyboard, surrounded by tickets.
 function drawGoblin(x, y, s = 1) {
@@ -536,39 +908,39 @@ function drawGoblin(x, y, s = 1) {
   ctx.restore();
 }
 
-// Pterodactyl with laser eyes
-function drawPtero(x, y, z, flip, s = 1) {
-  ellipse(x, y, 20 * s, 7 * s, 'rgba(0,0,0,0.22)');
-  const sp = getSprite('ptero', Math.floor(G.t * 8) % 2);
-  drawSprite(sp, x, y - z, fitScale(sp, 34 * s), flip);
+// Big sprites share Skelly's pixels-per-row so relative sizes stay true. Integer scales keep them crisp;
+// below ~0.75 (story slides, distant title shots) they shrink fractionally instead.
+const SPR_ROW = 106 / SK_H;
+function spriteScale(sp, s) { const r = SPR_ROW * s / sprUnit(); return r < 0.75 ? r : Math.max(1, Math.round(r)); }
+function cachedSprite(key, make) {
+  let sp = sprCache.get(key);
+  if (!sp) { const r = make(); sp = buildSprite(r.rows, r.pal); sprCache.set(key, sp); }
+  return sp;
 }
-// Monster truck (side view, rotated onto the iso axis)
-function drawTruck(x, y, s = 1, moving = false, rot = -0.4636) {
-  ctx.save(); ctx.translate(x, y);
-  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.beginPath(); ctx.ellipse(0, 0, 110 * s, 42 * s, rot, 0, Math.PI * 2); ctx.fill();
-  ctx.rotate(rot); ctx.scale(s, s);
-  const spin = moving ? G.t * 20 : 0;
-  ctx.strokeStyle = '#555'; ctx.lineWidth = 6; line(-52, -32, -10, -60); line(52, -32, 10, -60);
-  for (const wx of [-56, 56]) {
-    ctx.fillStyle = '#0d0d0d'; ctx.beginPath(); ctx.arc(wx, -32, 32, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 6;
-    for (let i = 0; i < 10; i++) { const a = spin + i * Math.PI / 5; line(wx + Math.cos(a) * 25, -32 + Math.sin(a) * 25, wx + Math.cos(a) * 32, -32 + Math.sin(a) * 32); }
-    ellipse(wx, -32, 13, 13, '#8a8f99'); ellipse(wx, -32, 5, 5, '#36d3e6');
-  }
-  ctx.fillStyle = '#14141a'; rr(-86, -98, 172, 40, 8); ctx.fill();
-  ctx.fillStyle = '#1b1b24'; rr(-22, -132, 66, 38, 10); ctx.fill();
-  ctx.fillStyle = 'rgba(95,246,255,0.55)'; rr(-14, -126, 24, 24, 4); ctx.fill(); rr(14, -126, 22, 24, 4); ctx.fill();
-  for (let i = 0; i < 6; i++) {
-    const bx = -82 + i * 24, h = 18 + (i % 2) * 8 + Math.sin(G.t * 10 + i) * 2;
-    poly([{ x: bx, y: -62 }, { x: bx + 30, y: -62 - h }, { x: bx + 26, y: -62 }], '#ff6a00');
-    poly([{ x: bx + 6, y: -62 }, { x: bx + 26, y: -64 - h * 0.6 }, { x: bx + 22, y: -62 }], '#ffd23b');
-  }
-  ellipse(-50, -82, 9, 8, '#f4f1e8'); ellipse(-53, -83, 2.2, 2.4, '#7a1aa8'); ellipse(-47, -83, 2.2, 2.4, '#7a1aa8');
-  ctx.fillStyle = '#f4f1e8'; ctx.fillRect(-55, -77, 10, 4);
-  text('TORQ', 40, -80, 18, '#ffffff', 'center', 'Impact, sans-serif', '400');
-  ctx.fillStyle = '#888'; ctx.fillRect(-6, -150, 6, 22); ctx.fillRect(4, -146, 6, 18);
-  for (let i = 0; i < 3; i++) poly([{ x: -7, y: -150 }, { x: -3 + Math.sin(G.t * 30 + i) * 3, y: -168 - i * 6 - Math.random() * 8 }, { x: 1, y: -150 }], i ? '#ffb02e' : '#c040ff');
-  ctx.restore();
+// draw so sprite pixel (ax, ay) lands on (x, y); returns a mapper from sprite pixels to user space
+function drawSpriteAt(sp, x, y, ax, ay, sc, flip) {
+  const u = sc * sprUnit(), fx = px => flip ? sp.w - px : px;
+  drawSprite(sp, x - (fx(ax) - sp.w / 2) * u, y - (ay - sp.h) * u, sc, flip);
+  return (px, py) => ({ x: x + (fx(px) - fx(ax)) * u, y: y + (py - ay) * u });
+}
+
+// Pterodactyl — skeletal, pink-boned, with a glowing cyan eye. Its body sits at (x, y - z); returns the eye position.
+function drawPtero(x, y, z, flip, s = 1) {
+  const sp = cachedSprite('ptero:' + Math.floor(G.t * 12) % PT_FRAMES, () => { const r = pteroGrid(Math.floor(G.t * 12) % PT_FRAMES); return { rows: r.rows, pal: PT_PAL }; });
+  const sc = spriteScale(sp, s), u = sc * sprUnit();
+  ellipse(x, y, 50 * u, 12 * u, 'rgba(0,0,0,0.22)');
+  const map = drawSpriteAt(sp, x, y - z, PT_BODY[0], PT_BODY[1], sc, flip);
+  return map(PT_EYE[0] + 0.5, PT_EYE[1] + 0.5);
+}
+function pteroIcon() { return cachedSprite('pteroIcon', () => ({ rows: PT_ICON, pal: PT_PAL })); }
+// Torq monster truck — side-on pixel sprite. Wheels turn and the body bounces while moving; z lifts it off the ground.
+function drawTruck(x, y, s = 1, moving = false, z = 0) {
+  const f = moving ? Math.floor(G.t * 16) % 4 : 0, fl = Math.floor(G.t * 12) % 3;
+  const sp = cachedSprite(`truck:${f}:${fl}`, () => ({ rows: truckGrid(f, fl), pal: TRUCK_PAL }));
+  const sc = spriteScale(sp, s), u = sc * sprUnit();
+  ellipse(x, y, sp.w * u * 0.48, sp.w * u * 0.1, `rgba(0,0,0,${clamp(0.4 - z / 900, 0.1, 0.4)})`);
+  const bounce = moving && Math.floor(G.t * 14) % 2 ? u : 0;
+  drawSprite(sp, x, y - z - bounce, sc);
 }
 
 // Enemies
@@ -748,7 +1120,7 @@ const G = {
   truck: null, truckParked: false, slides: null, slideI: 0, slideT: 0, onSlides: null,
   boonChoices: [], cardRects: [], deadT: 0, trT: 0, trBoss: null, trSaid: false, trBoom: false, introStage: 0, introT: 0,
 };
-let stats, player, ptero = { hidden: true, x: 0, y: 0, z: 90, a: 0, cd: 0, mode: 'orbit', beams: [] };
+let stats, player, ptero = { hidden: true, x: 0, y: 0, z: 0, cd: 0, mode: 'away', beams: [] };
 let enemies = [], projs = [], eprojs = [], parts = [], texts = [], tele = [], agents = [], obstacles = [], pickups = [];
 let dlg = null, nextId = 1;
 
@@ -779,7 +1151,7 @@ function transition(cb) { if (!G.fade) G.fade = { t: 0, cb, done: false }; }
 // =====================================================================
 function startGame() {
   stats = baseStats(); player = newPlayer();
-  ptero = { hidden: true, x: 0, y: 0, z: 90, a: 0, cd: 0, mode: 'orbit', beams: [] };
+  ptero = { hidden: true, x: 0, y: 0, z: 0, cd: 0, mode: 'away', beams: [] };
   let total = 0;
   for (const Lv of LEVELS) for (const w of Lv.waves) for (const [k, v] of Object.entries(w)) if (!ETYPES[k].boss) total += v;
   G.perKill = Math.floor(9000 / (total * 1.35));
@@ -791,20 +1163,26 @@ function showSlides(list, cb) { G.state = 'story'; G.slides = list; G.slideI = 0
 function startIntro() {
   setupLevel(0);
   G.state = 'intro'; G.introStage = 0; G.introT = 0;
-  G.truck = { x: 430, y: ROOM + 600 };
+  G.truck = { x: 430 - TRUCK_RUN, y: 720 + TRUCK_RUN, z: 0, u: 1 };   // jumps in from screen-left
   player.hidden = true; ptero.hidden = true;
   camSet(500, 700);
+}
+// the parked truck is long along the screen's x axis: one drawn obstacle plus two invisible ones for its ends
+const TRUCK_RUN = 620;
+function parkTruck() {
+  obstacles.push({ kind: 'truck', x: 430, y: 720, r: 50 });
+  for (const d of [-1, 1]) obstacles.push({ kind: 'truckEnd', x: 430 + d * 58, y: 720 - d * 58, r: 44 });
 }
 function setupLevel(i) {
   const Lv = LEVELS[i];
   G.level = i; enemies = []; eprojs = []; projs = []; tele = []; parts = []; texts = []; pickups = []; obstacles = [];
-  if (i !== 2) agents = []; // agents summoned during the Agent Foundry intro carry into its fight
+  agents = []; // the Agent Foundry intro summons its agents after this, so they still carry into its fight
   G.wave = -1; G.waveDelay = 0; G.cleared = false; G.reward = null; G.doorOpen = false; G.levelStarted = false; G.bark = null;
   const avoid = [{ x: 500, y: 880, r: 200 }, { x: 500, y: 500, r: 170 }, { x: 500, y: 40, r: 190 }, { x: 110, y: 110, r: 140 }];
   if (Lv.desks) {
     [[140, 300, 'MAYA'], [140, 520, 'DEX'], [140, 740, 'KAI']].forEach(([x, y, n]) => obstacles.push({ x, y, r: 44, kind: 'desk', name: n }));
     avoid.push({ x: 430, y: 720, r: 190 });
-    if (G.truckParked) obstacles.push({ kind: 'truck', x: 430, y: 720, r: 60 });
+    if (G.truckParked) parkTruck();
   }
   for (let n = 0, tries = 0; n < (Lv.racks || 0) && tries < 300; tries++) {
     const x = rand(160, 840), y = rand(160, 840);
@@ -816,7 +1194,7 @@ function setupLevel(i) {
   G.tufts = genTufts();
   player.x = 500; player.y = 880; player.dashT = 0; player.atkT = 0; player.inv = 0;
   player.dashCh = stats.dashMax; player.castAmmo = stats.castMax; player.pulseCd = 0;
-  ptero.x = player.x; ptero.y = player.y;
+  ptero.mode = 'away'; ptero.beams = [];
   camSet(player.x, player.y);
 }
 function enterLevel(i, skipIntro = false) {
@@ -988,12 +1366,13 @@ function updatePlayer(dt) {
   if (keys.KeyA || keys.ArrowLeft) sx--; if (keys.KeyD || keys.ArrowRight) sx++;
   if (keys.KeyW || keys.ArrowUp) sy--; if (keys.KeyS || keys.ArrowDown) sy++;
   let wx = sy + sx, wy = sy - sx; const l = Math.hypot(wx, wy); if (l > 0) { wx /= l; wy /= l; }
+  p.moving = l > 0;
 
   if (p.dashT > 0) {
     p.dashT -= dt;
     p.x += p.dashDir.x * 950 * dt; p.y += p.dashDir.y * 950 * dt;
     p.ghostT -= dt;
-    if (p.ghostT <= 0) { p.ghostT = 0.03; addPart({ kind: 'ghost', x: p.x, y: p.y, life: 0.25, flip: faceFlip(p.face) }); }
+    if (p.ghostT <= 0) { p.ghostT = 0.03; addPart({ kind: 'ghost', x: p.x, y: p.y, life: 0.25, flip: faceFlip(p.face), view: p.view }); }
     if (stats.dashDmg) for (const e of enemies) if (!p.dashHit.has(e) && !e.dead && dist(p, e) < e.r + p.r + 6) { p.dashHit.add(e); damageEnemy(e, stats.dashDmg * stats.atkMul, Math.atan2(e.y - p.y, e.x - p.x), 150, true, true); }
   } else {
     const atking = p.atkT > 0;
@@ -1156,7 +1535,6 @@ function updateSOAC(e, dt, d, ang) {
   if (!e.introDone) return;
   const hpf = e.hp / e.maxHp;
   if (e.arm > 0) e.arm -= dt;
-  if (hpf < 0.66 && e.phase === undefined) e.phase = 1;
   e.phase = e.phase || 1;
   if (hpf < 0.66 && e.phase === 1) { e.phase = 2; bark('S.O.A.C', 'MANUAL OVERRIDE ENGAGED. YOUR CLICKS ARE MINE.'); cam.shake = 12; }
   if (hpf < 0.33 && e.phase === 2) { e.phase = 3; bark('S.O.A.C', 'INITIATING... THE COMPLIANCE REPORT OF INFINITE PAGES!'); cam.shake = 12; }
@@ -1300,52 +1678,51 @@ function updateAgents(dt) {
   }
   agents = agents.filter(a => a.t > 0);
 }
-// Pterodactyl Strike [T]: the pterodactyl leaves its orbit, swoops low over the enemies and
-// burns them with purple eye-lasers, then climbs back to Skelly.
-const PTERO_CD = 10, PTERO_DIVE = 3;
-function pteroStrike() {
-  if (ptero.hidden || ptero.cd > 0 || ptero.mode === 'dive') return;
-  Object.assign(ptero, { mode: 'dive', t: PTERO_DIVE, cd: PTERO_CD, tgt: null, zapT: 0.25 });
-  tone(1100, 0.45, 'sawtooth', 0.14, 0.35); setTimeout(() => tone(800, 0.3, 'sawtooth', 0.1, 0.5), 120);
-  banner('PTERODACTYL STRIKE', 1.2, '#e070ff');
+// Pterodactyl Strike [T]: the pterodactyl screams in from off-screen, makes one low pass over the
+// thickest knot of enemies burning them with its eye-lasers, and is gone again.
+const PTERO_CD = 10, PTERO_PASS = 2.4, PTERO_HALF = 950;
+function pteroFlyby(tx, ty) {
+  const dir = Math.random() < 0.5 ? 1 : -1, ux = dir / Math.SQRT2, uy = -dir / Math.SQRT2;   // runs along screen x
+  Object.assign(ptero, { mode: 'flyby', t: 0, cx: tx, cy: ty, ux, uy, flip: dir < 0, zapT: 0.2, beams: [],
+    x: tx - ux * PTERO_HALF, y: ty - uy * PTERO_HALF, z: 280 });
+  tone(1100, 0.6, 'sawtooth', 0.14, 0.35); setTimeout(() => tone(760, 0.45, 'sawtooth', 0.1, 0.5), 160); noise(1.4, 0.12, 700, 'bandpass');
 }
-function pteroEye(s) { const u = PIX; return { x: s.x + (ptero.flip ? -5.5 : 5.5) * u, y: s.y - ptero.z - 4.5 * u }; }
+function pteroStrike() {
+  if (ptero.hidden || ptero.cd > 0 || ptero.mode === 'flyby') return;
+  // aim the pass through the densest cluster, favouring enemies near Skelly
+  let tx = player.x, ty = player.y, best = -Infinity;
+  for (const e of enemies) {
+    if (e.dead || e.spawnT > 0 || e.invuln) continue;
+    let n = -dist(e, player) / 500;
+    for (const o of enemies) if (!o.dead && o.spawnT <= 0 && dist(e, o) < 240) n++;
+    if (n > best) { best = n; tx = e.x; ty = e.y; }
+  }
+  pteroFlyby(tx, ty); ptero.cd = PTERO_CD;
+  banner('PTERODACTYL STRIKE', 1.2, '#ff6fb0');
+}
 function updatePtero(dt) {
   if (ptero.hidden) return;
   ptero.beams = (ptero.beams || []).filter(b => (b.t -= dt) > 0);
   if (ptero.cd > 0) ptero.cd -= dt * stats.pteroRate;
-  const prevX = ptero.x - ptero.y;
-  if (ptero.mode !== 'dive' || G.state !== 'play') {
-    ptero.a += dt * 1.4;
-    const tx = player.x + Math.cos(ptero.a) * 80, ty = player.y + Math.sin(ptero.a) * 80;
-    ptero.x += (tx - ptero.x) * Math.min(1, dt * 3); ptero.y += (ty - ptero.y) * Math.min(1, dt * 3);
-    ptero.z += (90 - ptero.z) * Math.min(1, dt * 3);
-  } else {
-    ptero.t -= dt;
-    if (!ptero.tgt || ptero.tgt.dead || ptero.tgt.invuln) {
-      let best = 1e9; ptero.tgt = null;
-      for (const e of enemies) { if (e.dead || e.spawnT > 0 || e.invuln) continue; const d = dist(ptero, e); if (d < best) { best = d; ptero.tgt = e; } }
+  if (ptero.mode !== 'flyby') return;
+  ptero.t += dt;
+  const k = ptero.t / PTERO_PASS, d = (k * 2 - 1) * PTERO_HALF;
+  ptero.x = ptero.cx + ptero.ux * d; ptero.y = ptero.cy + ptero.uy * d;
+  ptero.z = 110 + 170 * Math.pow(Math.abs(k * 2 - 1), 1.6);   // lowest right over the target
+  ptero.zapT -= dt;
+  if (ptero.zapT <= 0 && Math.abs(d) < 520 && G.state === 'play') {
+    ptero.zapT = 0.1;
+    // burn the two enemies closest to the spot just ahead of the beak
+    const ax = ptero.x + ptero.ux * 120, ay = ptero.y + ptero.uy * 120, da = e => Math.hypot(e.x - ax, e.y - ay);
+    const near = enemies.filter(e => !e.dead && e.spawnT <= 0 && !e.invuln && da(e) < 340).sort((a, b) => da(a) - da(b)).slice(0, 2);
+    for (const e of near) {
+      damageEnemy(e, 18 * stats.atkMul, Math.atan2(e.y - ptero.y, e.x - ptero.x), 90, false, true);
+      ptero.beams.push({ x: e.x, y: e.y, z: Math.min(e.h * 0.5, 120), t: 0.12 });
+      burst(e.x, e.y, '#7ff6ff', 4, 140, 30);
     }
-    const tg = ptero.tgt;
-    const tx = tg ? tg.x + Math.cos(G.t * 3.5) * (tg.r + 60) : player.x, ty = tg ? tg.y + Math.sin(G.t * 3.5) * (tg.r + 60) : player.y;
-    const dx = tx - ptero.x, dy = ty - ptero.y, d = Math.hypot(dx, dy);
-    if (d > 2) { const sp = Math.min(620, d * 6); ptero.x += dx / d * sp * dt; ptero.y += dy / d * sp * dt; }
-    ptero.z += (36 - ptero.z) * Math.min(1, dt * 6);
-    ptero.zapT -= dt;
-    if (ptero.zapT <= 0) {
-      ptero.zapT = 0.12;
-      const near = enemies.filter(e => !e.dead && e.spawnT <= 0 && !e.invuln && dist(e, ptero) < 300).sort((a, b) => dist(a, ptero) - dist(b, ptero)).slice(0, 2);
-      for (const e of near) {
-        damageEnemy(e, 12 * stats.atkMul, Math.atan2(e.y - ptero.y, e.x - ptero.x), 90, false, true);
-        ptero.beams.push({ x: e.x, y: e.y, z: Math.min(e.h * 0.5, 120), t: 0.15 });
-        burst(e.x, e.y, '#e070ff', 3, 120, 30);
-      }
-      if (near.length) SFX.laser();
-    }
-    if (ptero.t <= 0) ptero.mode = 'orbit';
+    if (near.length) SFX.laser();
   }
-  const nowX = ptero.x - ptero.y;
-  if (Math.abs(nowX - prevX) > 0.3) ptero.flip = nowX < prevX;
+  if (k >= 1) { ptero.mode = 'away'; ptero.beams = []; }
 }
 function updateProjs(dt) {
   for (const pr of projs) {
@@ -1428,7 +1805,14 @@ function updatePlay(dt) {
   updateFx(dt);
   if (dlg) { updateDlg(dt); return; }
   if (pressed.Escape || pressed.KeyP) { G.state = 'pause'; return; }
-  if (G.hitstop > 0) { G.hitstop -= dt; return; }
+  if (G.hitstop > 0) {
+    // hold presses made during the freeze so dashes/casts aren't swallowed
+    G.hitstop -= dt;
+    Object.assign(heldPress, pressed); mouse.pressed.forEach((v, i) => { if (v) heldMouse[i] = true; });
+    return;
+  }
+  Object.assign(pressed, heldPress); for (const k in heldPress) delete heldPress[k];
+  heldMouse.forEach((v, i) => { if (v) { mouse.pressed[i] = true; heldMouse[i] = false; } });
   G.time += dt;
   updatePlayer(dt);
   for (const e of enemies) if (!e.dead) updateEnemy(e, dt);
@@ -1457,18 +1841,20 @@ function updateIntro(dt) {
   G.introT += dt;
   if (G.introStage === 0) {
     const tr = G.truck;
-    tr.y -= 680 * dt;
-    for (let i = 0; i < 2; i++) addPart({ kind: 'spark', x: tr.x + rand(-20, 20), y: tr.y + 90, z: rand(10, 50), vz: rand(20, 80), life: 0.5, col: pick(['#ff6a00', '#ffb02e', '#c040ff']), sz: rand(4, 8) });
+    // airborne arc along the screen's x axis, slamming down at the parking spot
+    tr.u = Math.max(0, tr.u - dt / 1.1);
+    tr.x = 430 - TRUCK_RUN * tr.u; tr.y = 720 + TRUCK_RUN * tr.u; tr.z = 260 * (1 - (1 - tr.u) ** 2);
+    for (let i = 0; i < 2; i++) addPart({ kind: 'spark', x: tr.x - 60 + rand(-10, 10), y: tr.y + 60 + rand(-10, 10), z: tr.z + rand(70, 90), vz: rand(20, 80), life: 0.5, col: pick(['#ff6a00', '#ffb02e', '#c040ff']), sz: rand(4, 8) });
     camTo(tr.x, tr.y, dt);
-    if (tr.y <= 720) {
-      tr.y = 720; G.truckParked = true; G.truck = null;
-      obstacles.push({ kind: 'truck', x: 430, y: 720, r: 60 });
+    if (tr.u <= 0) {
+      G.truckParked = true; G.truck = null;
+      parkTruck();
       cam.shake = 16; SFX.boom(); burst(430, 720, '#ff6a00', 40, 300);
       G.introStage = 1; G.introT = 0;
     }
   } else if (G.introStage === 1) {
     if (G.introT > 0.6 && player.hidden) {
-      player.hidden = false; player.x = 520; player.y = 610; ptero.hidden = false; ptero.x = player.x; ptero.y = player.y;
+      player.hidden = false; player.x = 545; player.y = 585; ptero.hidden = false; pteroFlyby(player.x, player.y);   // the pterodactyl screams overhead as Skelly arrives
       burst(player.x, player.y, '#c040ff', 30, 220); ring(player.x, player.y, 5, 90, '#36d3e6'); SFX.summon();
     }
     camTo(player.x, player.y, dt);
@@ -1490,7 +1876,7 @@ function updateIntro(dt) {
         L('SOCRATES', '🔍 THREAT ENRICHMENT PULSE — [Right Click] or [K]. Blasts nearby foes and erases their projectiles.'),
         L('SOCRATES', '🛡️ PHISHING ANNIHILATION WAVE — [Q]. A piercing ranged cast. Recharges over time.'),
         L('SOCRATES', 'And [SPACE] to dash — untouchable mid-dash. Move with [WASD].'),
-        L('SOCRATES', 'PTERODACTYL STRIKE — [T]. Your winged companion dives on the enemy and burns them with purple eye-lasers. It needs time to recharge.'),
+        L('SOCRATES', 'PTERODACTYL STRIKE — [T]. Your bone-winged companion swoops in for one low pass and burns them with its eye-lasers. It needs time to recharge.'),
         L('SOCRATES', 'The final two Sacred Skills... you must earn. Now go. Ten thousand alerts await.'),
       ], () => { G.holoForce = 0; G.state = 'play'; setMusic('fight'); beginLevel(); });
     }
@@ -1528,13 +1914,13 @@ function updateStory(dt) {
     }
   }
 }
-function updateBoon() {
-  updateFx(0.016);
+function updateBoon(dt) {
+  updateFx(dt);
   for (let i = 0; i < 3; i++) if (pressed['Digit' + (i + 1)] || pressed['Numpad' + (i + 1)]) chooseBoon(i);
   if (mouse.pressed[0]) G.cardRects.forEach((r, i) => { if (mouse.x > r.x && mouse.x < r.x + r.w && mouse.y > r.y && mouse.y < r.y + r.h) chooseBoon(i); });
 }
 function updateTitle(dt) {
-  if (pressed.Enter || pressed.NumpadEnter) { audioInit(); SFX.boom(); transition(startGame); }
+  if ((pressed.Enter || pressed.NumpadEnter || mouse.pressed[0]) && !G.fade) { audioInit(); SFX.boom(); transition(startGame); }
 }
 
 function update(dt) {
@@ -1551,9 +1937,9 @@ function update(dt) {
     case 'story': updateStory(dt); break;
     case 'intro': updateIntro(dt); break;
     case 'play': updatePlay(dt); break;
-    case 'boon': updateBoon(); break;
+    case 'boon': updateBoon(dt); break;
     case 'pause': if (pressed.Escape || pressed.KeyP) { G.state = 'play'; G.inputLock = 0.2; } break;
-    case 'dead': updateFx(dt); G.deadT += dt; if (G.deadT > 1 && (pressed.Enter || pressed.NumpadEnter) && !G.fade) retryLevel(); break;
+    case 'dead': updateFx(dt); G.deadT += dt; if (G.deadT > 1 && (pressed.Enter || pressed.NumpadEnter || mouse.pressed[0]) && !G.fade) retryLevel(); break;
     case 'transform': updateTransform(dt); break;
   }
 }
@@ -1785,14 +2171,13 @@ function collectLights() {
     if (o.kind === 'desk') addLight(o.x - 8, o.y, 50, 100, G.level > 0 || G.cleared ? '#36d3e6' : '#ff3b4e', 0.5);
     if (o.kind === 'truck') addLight(o.x, o.y, 60, 120, '#ff8a2a', 0.35);
   }
-  if (G.truck) addLight(G.truck.x, G.truck.y, 40, 200, '#ff8a2a', 0.7);
+  if (G.truck) addLight(G.truck.x, G.truck.y, G.truck.z + 40, 200, '#ff8a2a', 0.7);
   if (G.reward) addLight(G.reward.x, G.reward.y, 40, 160, '#b46bff', 0.8);
   for (const pk of pickups) addLight(pk.x, pk.y, 14, 60, '#4dff7a', 0.5);
   addLight(500, 8, 40, G.doorOpen ? 240 : 110, G.doorOpen ? '#36d3e6' : '#ff3b4e', G.doorOpen ? 0.85 : 0.35);
   if (G.holoVis > 0.05) addLight(G.holoX, G.holoY, 120, 280, '#6ff7ff', 0.6 * G.holoVis);
-  if (!ptero.hidden) addLight(ptero.x, ptero.y, ptero.z, 45, '#ff2a2a', 0.35);
-  for (const b of ptero.beams || []) addLight(b.x, b.y, b.z, 110, '#d040ff', 0.75);
-  if (ptero.mode === 'dive' && !ptero.hidden) addLight(ptero.x, ptero.y, ptero.z, 120, '#d040ff', 0.5);
+  if (!ptero.hidden && ptero.mode === 'flyby') addLight(ptero.x, ptero.y, ptero.z, 170, '#ff5fa8', 0.35);
+  for (const b of ptero.beams || []) addLight(b.x, b.y, b.z, 110, '#5ff0ff', 0.75);
   for (const q of parts) if (q.kind === 'ring') { const a = clamp(q.life / q.max, 0, 1); addLight(q.x, q.y, 10, lerp(q.r1, q.r0, a) * 1.3, q.col, 0.6 * a); }
   for (const t of tele) if (t.kind === 'circle') addLight(t.x, t.y, 5, t.r * 1.2, '#ff3b4e', 0.3);
 }
@@ -2038,8 +2423,8 @@ function drawObstacle(o) {
       ctx.fillRect(lerp(c.x, b.x, f) - 1.5, lerp(c.y, b.y, f) - 15 - r * 11, 3, 2.5);
     }
   } else if (o.kind === 'desk') {
-    isoBox(o.x, o.y, 26, 42, 32, '#3a3f4f', '#22252f', '#2b2f3b', '#4a5064');
-    const m = iso(o.x - 8, o.y, 32);
+    isoBox(o.x, o.y, 26, 42, 48, '#3a3f4f', '#22252f', '#2b2f3b', '#4a5064');
+    const m = iso(o.x - 8, o.y, 48);
     ctx.fillStyle = '#111'; ctx.fillRect(m.x - 16, m.y - 30, 32, 24); ctx.fillRect(m.x - 2, m.y - 8, 4, 8);
     const ok = G.level > 0 || G.cleared;
     ctx.shadowColor = ok ? '#36d3e6' : '#ff3b4e'; ctx.shadowBlur = 14;
@@ -2049,7 +2434,7 @@ function drawObstacle(o) {
     drawAnalyst(s.x, s.y, o.name, 1, G.cleared);
     CRISP = true; text(o.name, s.x, s.y + 12, 10, '#ffd23b'); CRISP = false;
   } else if (o.kind === 'truck') {
-    const s = iso(o.x, o.y); drawTruck(s.x, s.y, 0.75, false);
+    const s = iso(o.x, o.y); drawTruck(s.x, s.y, 1, false);
   }
 }
 function drawPlayer() {
@@ -2063,10 +2448,12 @@ function drawPlayer() {
     const a = p.face - arc * dir + 2 * arc * dir * Math.min(1, prog * 2.2);
     sang = aimScreenAngle(a);
   } else sang = flip ? -2.25 : -0.9;
-  const hand = { x: s.x + (flip ? -12 : 12), y: s.y - 38 };
-  if (!atk) drawScythe(hand.x, hand.y + 6, sang, 1);
-  drawSkelly(s.x, s.y, { flip, walk: p.walk, flash: false, armsOut: !atk });
-  if (p.flash > 0) { FLASH = true; drawSkelly(s.x, s.y, { flip, walk: p.walk, armsOut: !atk, noShadow: true }); FLASH = false; }
+  p.view = skellyView(p.face, p.view);
+  const pose = p.dashT > 0 ? 'dash' : atk ? 'atk' : p.moving ? 'walk' : 'idle';
+  const o = { view: p.view, pose, flip, frame: pose === 'walk' ? Math.floor(p.walk * 0.9) : undefined };
+  // at rest the scythe rides in his hand, behind the robe
+  drawSkelly(s.x, s.y, { ...o, under: atk ? null : h => drawScythe(h.x, h.y, sang, 1) });
+  if (p.flash > 0) { FLASH = true; drawSkelly(s.x, s.y, { ...o, noShadow: true }); FLASH = false; }
   if (atk) drawScythe(s.x, s.y - 34, sang, 1.15, 1);
   ctx.globalAlpha = 1;
 }
@@ -2171,7 +2558,7 @@ function drawParts(ground) {
       ctx.shadowColor = p.col; ctx.shadowBlur = 15; ctx.stroke(); ctx.shadowBlur = 0; ctx.globalAlpha = 1;
     } else if (p.kind === 'ghost') {
       if (ground) continue;
-      const s = iso(p.x, p.y); ctx.globalAlpha = a * 0.5; drawSkelly(s.x, s.y, { flip: p.flip, ghost: true, noShadow: true }); ctx.globalAlpha = 1;
+      const s = iso(p.x, p.y); ctx.globalAlpha = a * 0.5; drawSkelly(s.x, s.y, { flip: p.flip, view: p.view, pose: 'dash', ghost: true, noShadow: true }); ctx.globalAlpha = 1;
     } else if (!ground) {
       const s = iso(p.x, p.y, p.z); ctx.globalAlpha = a; ctx.fillStyle = p.col; ctx.fillRect(s.x - p.sz / 2, s.y - p.sz / 2, p.sz, p.sz); ctx.globalAlpha = 1;
     }
@@ -2215,7 +2602,7 @@ function renderWorld() {
   for (const e of enemies) R.push({ d: e.x + e.y, f: () => drawEnemy(e) });
   for (const a of agents) R.push({ d: a.x + a.y, f: () => { const s = iso(a.x, a.y); drawAgent(s.x, s.y, a); } });
   if (player && !player.hidden) R.push({ d: player.x + player.y, f: () => { drawSwing(); drawPlayer(); } });
-  if (G.truck) R.push({ d: G.truck.x + G.truck.y, f: () => { const s = iso(G.truck.x, G.truck.y); drawTruck(s.x, s.y, 0.75, true); } });
+  if (G.truck) R.push({ d: G.truck.x + G.truck.y, f: () => { const s = iso(G.truck.x, G.truck.y); drawTruck(s.x, s.y, 1, true, G.truck.z); } });
   if (G.reward) R.push({ d: G.reward.x + G.reward.y, f: () => {
     const s = iso(G.reward.x, G.reward.y), b = Math.sin(G.t * 3) * 6;
     ctx.shadowColor = '#b46bff'; ctx.shadowBlur = 30;
@@ -2232,15 +2619,14 @@ function renderWorld() {
   for (const p of projs) drawProj(p);
   for (const b of eprojs) drawEProj(b);
   drawParts(false);
-  if (!ptero.hidden) {
-    const s = iso(ptero.x, ptero.y);
-    drawPtero(s.x, s.y, ptero.z, ptero.flip);
-    const eye = pteroEye(s);
+  if (!ptero.hidden && ptero.mode === 'flyby') {
+    const s = iso(ptero.x, ptero.y), eye = drawPtero(s.x, s.y, ptero.z, ptero.flip);
     for (const b of ptero.beams || []) {
       const t = iso(b.x, b.y, b.z);
-      ctx.shadowColor = '#d040ff'; ctx.shadowBlur = 12;
-      for (const off of [-PIX * 0.6, PIX * 0.6]) { ctx.strokeStyle = '#c040ff'; ctx.lineWidth = PIX * 1.6; line(eye.x + off, eye.y, t.x, t.y); }
-      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = PIX * 0.7; line(eye.x, eye.y, t.x, t.y); ctx.shadowBlur = 0;
+      ctx.shadowColor = '#36d3e6'; ctx.shadowBlur = 14;
+      ctx.strokeStyle = '#36d3e6'; ctx.lineWidth = PIX * 2.2; line(eye.x, eye.y, t.x, t.y);
+      ctx.strokeStyle = '#e8ffff'; ctx.lineWidth = PIX * 0.9; line(eye.x, eye.y, t.x, t.y); ctx.shadowBlur = 0;
+      ellipse(eye.x, eye.y, PIX * 2.5, PIX * 2.5, '#e8ffff');
     }
   }
   if (G.state === 'transform') drawBindLines();
@@ -2284,7 +2670,7 @@ function renderHUD() {
     { key: 'Q', name: 'WAVE', icon: '🛡️', cd: p.castAmmo > 0 ? 0 : 1 - p.castReT / stats.castRe, count: p.castAmmo, max: stats.castMax },
     { key: 'SPACE', name: 'DASH', icon: '💨', cd: p.dashCh > 0 ? 0 : 1 - p.dashRe / 0.9, count: p.dashCh, max: stats.dashMax },
   ];
-  if (!ptero.hidden) slots.push({ key: 'T', name: 'PTERO', icon: () => getSprite('ptero', Math.floor(G.t * 8) % 2), cd: clamp(ptero.cd / PTERO_CD, 0, 1), ready: ptero.cd <= 0 && ptero.mode !== 'dive' });
+  if (!ptero.hidden) slots.push({ key: 'T', name: 'PTERO', icon: pteroIcon, cd: clamp(ptero.cd / PTERO_CD, 0, 1), ready: ptero.cd <= 0 && ptero.mode !== 'flyby' });
   if (stats.agentsUnlocked) slots.push({ key: 'E', name: 'AGENTS', icon: '🤖', cd: 1 - p.meter / 100, ready: p.meter >= 100, meter: true });
   if (stats.bindUnlocked) slots.push({ key: 'R', name: 'BIND', icon: '🔗', cd: 0, ready: true });
   slots.forEach((s, i) => {
@@ -2325,7 +2711,7 @@ function renderHUD() {
   // boss bar
   const boss = enemies.find(e => e.boss && e.spawnT <= 0 && (e.type !== 'soac' || e.introDone));
   if (boss) {
-    const w = Math.min(560, W - 560), x = W / 2 - w / 2, y = 88;
+    const w = Math.max(Math.min(560, W - 560), Math.min(240, W - 40)), x = W / 2 - w / 2, y = 88;
     text(boss.name, W / 2, y - 4, 14, '#ffb0b8', 'center', UI_FONT, '700', '#ff2a2a');
     ctx.fillStyle = 'rgba(0,0,0,0.7)'; rr(x - 2, y + 6, w + 4, 16, 4); ctx.fill();
     const bg = ctx.createLinearGradient(x, 0, x + w, 0); bg.addColorStop(0, '#a01020'); bg.addColorStop(1, '#ff3b4e');
@@ -2366,9 +2752,9 @@ function drawPortrait(who, x, y, w, h) {
   const crisp = CRISP; CRISP = false;
   ctx.save(); rr(x, y, w, h, 10); ctx.fillStyle = '#070b18'; ctx.fill(); ctx.clip();
   const cx = x + w / 2, cy = y + h / 2;
-  if (who === 'SKELLY') drawSkelly(cx, cy + h * 0.95, { s: 2.5, armsOut: false, noShadow: true });
+  if (who === 'SKELLY') drawSkelly(cx, cy + h, { s: 2, noShadow: true }); // head-and-shoulders framing
   else if (who === 'SOCRATES') { ctx.fillStyle = 'rgba(95,246,255,0.08)'; ctx.fillRect(x, y, w, h); drawSocratesHead(cx, cy - 12, 46, 1, dlg && dlg.chars < dlg.lines[dlg.i].text.length); }
-  else if (ANALYSTS[who]) drawAnalyst(cx, cy + 62, who, 2.1, G.state === 'transform');
+  else if (ANALYSTS[who]) drawAnalyst(cx, cy + h, who, 2, G.state === 'transform');   // head-and-shoulders framing
   else if (who === 'S.O.A.C') drawSOAC(cx, cy + 175, { k: 0, arm: 0 }, 0.62);
   else if (who === 'HIGH PRIEST') drawMonk(cx, cy + 120, { t: G.t }, false, 2.6, true);
   else if (who === 'SOC GOBLIN') drawGoblin(cx - 10, cy + 70, 1.4);
@@ -2453,7 +2839,7 @@ function sceneOffice(x, y, w, h, happy) {
   ['MAYA', 'DEX', 'KAI'].forEach((n, i) => {
     const ax = x + w * (0.3 + i * 0.2), ay = y + h * 0.9;
     ctx.fillStyle = '#2a2f3a'; ctx.fillRect(ax - 40, ay - 50, 80, 8);
-    drawAnalyst(ax, ay, n, 1.6, happy);
+    drawAnalyst(ax, ay, n, 0.8, happy);
   });
   if (!happy) for (let i = 0; i < 40; i++) {
     const tx = x + hash(i, 5) * w, ty = y + h * 0.7 + hash(i, 6) * h * 0.3;
@@ -2485,8 +2871,8 @@ const SLIDES = {
       const tx = lerp(x + w * 0.42, x + w * 0.6, k), ty = lerp(y + h * 0.92, y + h * 0.66, k), sc = lerp(0.7, 0.2, k);
       for (let i = 0; i < 6; i++) { ctx.globalAlpha = 0.6; ellipse(tx - 60 * sc - i * 14 * sc, ty - 40 * sc + Math.sin(G.t * 20 + i) * 4, 10 * sc * (1 + i * 0.3), 6 * sc, pick(['#ff6a00', '#c040ff', '#ffb02e'])); }
       ctx.globalAlpha = 1;
-      drawTruck(tx, ty, sc, true, -0.3);
-      drawPtero(tx + 40 * sc + Math.sin(G.t) * 30, ty, 160 * sc + 40, false);
+      drawTruck(tx, ty, sc, true);
+      drawPtero(tx + 40 * sc + Math.sin(G.t) * 30, ty, 160 * sc + 40, false, sc * 1.2);
     } },
   goblin: { chapter: 'MEANWHILE', title: '...in a Server Closet',
     text: 'The SOC Goblin — hunched over a keyboard, buried in a mountain of tickets — watched it all from the shadows.\nThen, very quietly, he added his name to the Torq waitlist.',
@@ -2543,11 +2929,12 @@ function renderTitle() {
   for (let x = 4; x < W; x += 9) drawBlades(x, ground - 2, 2, 10 * sc / 2.6, hash(x, 3) < 0.5 ? A.veg : shadeHex(A.veg, 1.4), x);
   const torches = [W * 0.31, W * 0.69];
   for (const tx of torches) { ctx.fillStyle = '#2a1d12'; ctx.fillRect(tx - 3 * sc / 2, ground - 46 * sc, 3 * sc, 46 * sc); ctx.fillStyle = '#4a3a26'; ctx.fillRect(tx - 5 * sc / 2, ground - 49 * sc, 5 * sc, 4 * sc); flameAt(tx, ground - 49 * sc, sc * 0.9); }
-  drawTruck(W * 0.15, ground + 3, sc * 0.42, false, 0);
-  drawSkelly(W / 2, ground + 2, { s: sc });
-  drawScythe(W / 2 + 26 * sc, ground - 48 * sc, -1.2, sc * 0.9, 1);
-  const pa = G.t * 0.8;
-  drawPtero(W / 2 + Math.cos(pa) * W * 0.27, ground, H * 0.3 + Math.sin(G.t * 1.6) * 14, Math.sin(pa) > 0, 2.5);
+  drawTruck(W * 0.15, ground + 3, sc * 0.5);
+  const th = drawSkelly(W / 2, ground + 2, { s: sc });
+  drawScythe(th.x, th.y, -1.2, sc * 0.9, 1);
+  // every few seconds the pterodactyl sweeps right-to-left across the dusk sky
+  const tp = (G.t % 9) / 3.2;
+  if (tp < 1) drawPtero(W * (1.35 - tp * 1.7), ground, H * 0.42 - Math.sin(tp * Math.PI) * H * 0.08, true, sc * 0.5);
   // light it, then put the sky behind
   const L = [
     ...torches.map(tx => ({ x: tx / P, y: (ground - 55 * sc) / P, r: H * 0.32 / P, c: '#ff9a48', i: 0.95 })),
@@ -2581,9 +2968,13 @@ function renderTitle() {
   ctx.restore();
   drawWeather('fireflies', w, h);
   setUI();
-  text('SKELLY', W / 2, H * 0.12, Math.min(110, W / 8), '#e8f8ff', 'center', TITLE_FONT, '400', '#36d3e6');
-  text('& THE DEATH OF SOAR', W / 2, H * 0.12 + Math.min(80, W / 11), Math.min(54, W / 16), '#c56bff', 'center', TITLE_FONT, '400', '#b046ff');
-  text('A TORQ HYPERAUTOMATION TALE', W / 2, H * 0.27, 16, '#e8d0e0', 'center', UI_FONT, '700');
+  // "SOC IT TO ME," over a big "SKELLY", then the long subtitle wrapped underneath
+  const t1 = H * 0.065, t2 = t1 + Math.min(80, W / 12), subSz = Math.min(24, W / 40);
+  text('SOC IT TO ME,', W / 2, t1, Math.min(60, W / 17), '#c9f6ff', 'center', TITLE_FONT, '400', '#36d3e6');
+  text('SKELLY', W / 2, t2, Math.min(110, W / 8), '#e8f8ff', 'center', TITLE_FONT, '400', '#36d3e6');
+  const subLines = wrapLines("A Flaming Skeleton's Unreasonable Guide to Killing Alert Fatigue and Going Home on Time".toUpperCase(), Math.min(W - 80, 900), subSz, TITLE_FONT);
+  subLines.forEach((l, i) => text(l, W / 2, t2 + Math.min(66, W / 15) + i * subSz * 1.15, subSz, '#c56bff', 'center', TITLE_FONT, '400', '#b046ff'));
+  text('A TORQ HYPERAUTOMATION TALE', W / 2, t2 + Math.min(66, W / 15) + subLines.length * subSz * 1.15 + 8, 16, '#e8d0e0', 'center', UI_FONT, '700');
   if (Math.sin(G.t * 4) > -0.3) text('PRESS ENTER TO START', W / 2, H * 0.83, Math.min(34, W / 24), '#ffffff', 'center', UI_FONT, '700', '#36d3e6');
   text('"Your security product\'s favorite security product — and the only skeleton brave enough to prove it."', W / 2, H * 0.9, 15, '#c9b8d8', 'center', UI_FONT, '500');
   text('WASD move · Mouse aim · LMB strike · RMB pulse · Q wave · SPACE dash · T ptero · M music · C CRT', W / 2, H * 0.95, 13, 'rgba(200,190,220,0.7)');

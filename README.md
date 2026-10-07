@@ -1,4 +1,6 @@
-# Skelly & The Death of SOAR
+# SOC It To Me, Skelly
+
+*A Flaming Skeleton's Unreasonable Guide to Killing Alert Fatigue and Going Home on Time*
 
 A Torq Hyperautomation Tale — a short isometric hack-and-slash in the browser.
 
