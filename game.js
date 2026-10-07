@@ -2872,7 +2872,11 @@ const SLIDES = {
       for (let i = 0; i < 6; i++) { ctx.globalAlpha = 0.6; ellipse(tx - 60 * sc - i * 14 * sc, ty - 40 * sc + Math.sin(G.t * 20 + i) * 4, 10 * sc * (1 + i * 0.3), 6 * sc, pick(['#ff6a00', '#c040ff', '#ffb02e'])); }
       ctx.globalAlpha = 1;
       drawTruck(tx, ty, sc, true);
-      drawPtero(tx + 40 * sc + Math.sin(G.t) * 30, ty, 160 * sc + 40, false, sc * 1.2);
+      // pterodactyl rides the sky ahead of the truck, always kept clear above the truck's drawn roofline
+      const ps = sc * 0.6, truckTop = ty - TRUCK_H * spriteScale(null, sc) * sprUnit();
+      const below = (PT_H - PT_BODY[1]) * spriteScale(null, ps) * sprUnit();
+      const py = Math.min(lerp(y + h * 0.3, y + h * 0.5, k), truckTop - 12 - below) + Math.sin(G.t * 1.7) * 4 - 4;
+      drawPtero(tx + 60 * sc + Math.sin(G.t) * 20, ty, ty - py, false, ps);
     } },
   goblin: { chapter: 'MEANWHILE', title: '...in a Server Closet',
     text: 'The SOC Goblin — hunched over a keyboard, buried in a mountain of tickets — watched it all from the shadows.\nThen, very quietly, he added his name to the Torq waitlist.',
